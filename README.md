@@ -1,3 +1,4 @@
+To run the app, open PowerShell and run:
 cd "C:\path\where\you\saved\the\project\sandbox"
 powershell -ExecutionPolicy Bypass -File .\scripts\Start-BackendAndSandbox.ps1
 
