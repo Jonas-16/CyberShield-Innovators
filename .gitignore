@@ -1,0 +1,64 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Virtual environments
+.venv/
+.venv-ml/
+venv/
+env/
+ENV/
+
+# Environment files
+.env
+.env.*
+
+# Backend runtime artifacts
+Backend/app/reports/*.jsonl
+Backend/app/reports/*.log
+Backend/*.log
+
+# Frontend / Node
+Frontend/node_modules/
+Frontend/dist/
+Frontend/.vite/
+Frontend/.env
+Frontend/.env.*
+Frontend/npm-debug.log*
+Frontend/yarn-debug.log*
+Frontend/yarn-error.log*
+Frontend/pnpm-debug.log*
+
+# Sandbox runtime artifacts
+sandbox/scripts/stack-state.json
+sandbox/*.log
+sandbox/*.tmp
+
+# General logs / temp
+*.log
+*.tmp
+*.bak
+*.pid
+
+# Build / packaging
+build/
+dist/
+*.egg-info/
