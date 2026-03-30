@@ -29,15 +29,6 @@ The stable top-level router used by the app is:
 Backend/app/scanner.py
 ```
 
-## Main Paths
-
-- Project root: `C:\Users\JOSEPH\Desktop\Sem VIII\Project\CyberShield Innovators`
-- Manual uploads: `C:\Sandbox_ManualUploads`
-- Download watch folder: `D:\Download`
-- Sandbox session root: `C:\Sandbox_VM_Input\sessions`
-- Sandbox logs: `C:\Sandbox_Logs\sandbox.log`
-- Scan event log: `Backend/app/reports/scan_events.jsonl`
-
 ## Run The Full Stack
 
 Start everything from the `sandbox` folder:
