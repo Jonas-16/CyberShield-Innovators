@@ -73,8 +73,9 @@ $stackState | ConvertTo-Json | Set-Content -Path $stackStatePath
 
 Write-Host "Backend, sandbox monitor, and frontend launched."
 Write-Host "Waiting for services to come up before running health check..."
-Start-Sleep -Seconds 8
+Start-Sleep -Seconds 15
 Write-Host ""
 Write-Host "Stack health"
 & $healthCheckScript
+
 

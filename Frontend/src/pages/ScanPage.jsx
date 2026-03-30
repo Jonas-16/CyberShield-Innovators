@@ -1,5 +1,6 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 
+const MANUAL_UPLOAD_ROOT = 'C:\\Sandbox_ManualUploads';
 const API_BASE_URL = import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:8000';
 
 export default function ScanPage() {
@@ -8,8 +9,83 @@ export default function ScanPage() {
   const [message, setMessage] = useState('');
   const [result, setResult] = useState(null);
 
+  useEffect(() => {
+    const raw = localStorage.getItem('latestSandboxFile');
+    if (!raw) {
+      return;
+    }
+
+    try {
+      const payload = JSON.parse(raw);
+      const stagingPath = String(payload?.staging_path || '');
+      const scanPath = String(payload?.scan_result?.path || '');
+      const isManualUploadResult =
+        stagingPath.startsWith(MANUAL_UPLOAD_ROOT) || scanPath.startsWith(MANUAL_UPLOAD_ROOT);
+
+      if (!isManualUploadResult) {
+        return;
+      }
+
+      setSelectedFile({ name: payload.file_name });
+      setResult(payload);
+      setMessage(
+        payload?.status === 'ignored'
+          ? (payload?.message || 'Unsupported file type.')
+          : `Scan completed: ${payload.file_name}`
+      );
+    } catch (_) {
+      // Ignore malformed cached payloads.
+    }
+  }, []);
+
+
+  useEffect(() => {
+    const fileName = result?.file_name;
+    if (!fileName || result?.status !== 'processing') {
+      return;
+    }
+
+    let active = true;
+
+    const poll = async () => {
+      try {
+        const response = await fetch(`${API_BASE_URL}/api/scan/results/${encodeURIComponent(fileName)}`);
+        if (!response.ok) {
+          return;
+        }
+
+        const payload = await response.json();
+        if (!active) {
+          return;
+        }
+
+        if (payload?.status === 'processing') {
+          setMessage(`Scanning ${fileName}...`);
+          return;
+        }
+
+        localStorage.setItem('latestSandboxFile', JSON.stringify(payload));
+        setResult(payload);
+        setMessage(
+          payload?.status === 'ignored'
+            ? (payload?.message || 'Unsupported file type.')
+            : `Scan completed: ${payload.file_name}`
+        );
+      } catch (_) {
+        // keep current state during polling failures
+      }
+    };
+
+    poll();
+    const timer = setInterval(poll, 2000);
+
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, [result?.file_name, result?.status]);
   const currentStep = useMemo(() => {
-    if (isUploading) return 2;
+    if (isUploading) return 5;
     if (result) return 6;
     if (selectedFile) return 1;
     return 0;
@@ -19,9 +95,9 @@ export default function ScanPage() {
     const file = event.target.files?.[0];
     if (!file) return;
 
-    setSelectedFile(file);
+    setSelectedFile({ name: file.name });
     setResult(null);
-    setMessage('Uploading file to sandbox queue...');
+    setMessage('Uploading file for manual scanning...');
     setIsUploading(true);
 
     const formData = new FormData();
@@ -40,7 +116,11 @@ export default function ScanPage() {
 
       localStorage.setItem('latestSandboxFile', JSON.stringify(payload));
       setResult(payload);
-      setMessage(`Queued: ${payload.file_name}`);
+      setMessage(
+        payload?.status === 'ignored'
+          ? (payload?.message || 'Unsupported file type.')
+          : `Scan completed: ${payload.file_name}`
+      );
     } catch (error) {
       const isNetworkError = error instanceof TypeError && String(error.message || '').toLowerCase().includes('fetch');
       if (isNetworkError) {
@@ -73,8 +153,8 @@ export default function ScanPage() {
       <div className="card upload-card">
         <h3>Manual File Check</h3>
         <label htmlFor="scanFileInput" className="upload-dropzone">
-          <span>{isUploading ? 'Uploading...' : 'Click here to choose a file'}</span>
-          <span className="muted">File will be sent to sandbox queue immediately</span>
+          <span>{isUploading ? 'Scanning...' : 'Click here to choose a file'}</span>
+          <span className="muted">Manual uploads are scanned directly by the backend.</span>
           <input id="scanFileInput" type="file" onChange={handleFileChange} disabled={isUploading} />
         </label>
         {selectedFile && <p className="scan-file">Selected: {selectedFile.name}</p>}
@@ -84,12 +164,14 @@ export default function ScanPage() {
 
       <ol className="step-list">
         <li className={`step ${currentStep >= 1 ? 'done' : ''}`}>1. File Detected</li>
-        <li className={`step ${currentStep === 2 ? 'current' : currentStep > 2 ? 'done' : ''}`}>2. Queued in Sandbox</li>
-        <li className={`step ${currentStep >= 3 ? 'done' : ''}`}>3. Checking New Threat Patterns</li>
-        <li className={`step ${currentStep >= 4 ? 'done' : ''}`}>4. Checking Hidden Data</li>
-        <li className={`step ${currentStep >= 5 ? 'done' : ''}`}>5. Checking Adversarial Attacks</li>
+        <li className={`step ${currentStep >= 2 ? (currentStep === 2 ? 'current' : 'done') : ''}`}>2. Upload Received</li>
+        <li className={`step ${currentStep >= 3 ? (currentStep === 3 ? 'current' : 'done') : ''}`}>3. Preparing Scan</li>
+        <li className={`step ${currentStep >= 4 ? (currentStep === 4 ? 'current' : 'done') : ''}`}>4. Running Scanner</li>
+        <li className={`step ${currentStep >= 5 ? (currentStep === 5 ? 'current' : 'done') : ''}`}>5. Finalizing Result</li>
         <li className={`step ${currentStep >= 6 ? 'done' : ''}`}>6. Scan Completed</li>
       </ol>
     </section>
   );
 }
+
+

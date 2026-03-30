@@ -1,6 +1,54 @@
-﻿import React from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
+
+const API_BASE_URL = import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:8000';
+const LOG_POLL_INTERVAL_MS = 10000;
+const NON_SCAN_POST_ACTIONS = new Set(['approved_via_result_page', 'rejected_via_result_page', 'deleted']);
+
+function formatTimestamp(value) {
+  if (!value) return '--';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '--';
+  return date.toLocaleString();
+}
 
 export default function DashboardPage() {
+  const [items, setItems] = useState([]);
+
+  useEffect(() => {
+    let active = true;
+
+    const loadLogs = async () => {
+      try {
+        const response = await fetch(`${API_BASE_URL}/api/scan/logs?limit=500`);
+        if (!response.ok) {
+          return;
+        }
+        const payload = await response.json();
+        if (active) {
+          setItems(Array.isArray(payload.items) ? payload.items : []);
+        }
+      } catch (_) {
+        // keep current dashboard values if backend is unavailable
+      }
+    };
+
+    loadLogs();
+    const timer = setInterval(loadLogs, LOG_POLL_INTERVAL_MS);
+
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, []);
+
+  const stats = useMemo(() => {
+    const scanItems = items.filter((item) => !NON_SCAN_POST_ACTIONS.has(item?.post_action || ''));
+    const filesScanned = scanItems.length;
+    const threatsBlocked = scanItems.filter((item) => item?.decision === 'BLOCKED').length;
+    const lastScan = scanItems.length > 0 ? formatTimestamp(scanItems[0]?.ts) : '--';
+    return { filesScanned, threatsBlocked, lastScan };
+  }, [items]);
+
   return (
     <section className="page dashboard-page">
       <div className="dashboard-hero card">
@@ -21,15 +69,15 @@ export default function DashboardPage() {
       <div className="summary-grid compact">
         <article className="card stat-card">
           <h4>Last Scan</h4>
-          <p>2026-02-13 10:42 AM</p>
+          <p>{stats.lastScan}</p>
         </article>
         <article className="card stat-card">
           <h4>Files Scanned</h4>
-          <p>124</p>
+          <p>{stats.filesScanned}</p>
         </article>
         <article className="card stat-card">
           <h4>Threats Blocked</h4>
-          <p>9</p>
+          <p>{stats.threatsBlocked}</p>
         </article>
       </div>
 

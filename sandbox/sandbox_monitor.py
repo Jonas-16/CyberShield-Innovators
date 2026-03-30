@@ -47,13 +47,16 @@ IGNORED_FILE_NAMES = {
     "desktop.ini",
     "thumbs.db",
 }
+SESSION_APPROVE_MARKER = ".approved"
+SESSION_REJECT_MARKER = ".rejected"
 
 if BACKEND_ROOT not in sys.path:
     sys.path.insert(0, BACKEND_ROOT)
 
 try:
-    from app.scanner import scan_file, write_scan_event
+    from app.scanner import is_supported_file, scan_file, write_scan_event
 except Exception:
+    is_supported_file = None
     scan_file = None
     write_scan_event = None
 
@@ -71,6 +74,17 @@ def is_temporary_download_path(path):
         if lower.endswith(ext):
             return True
     return False
+
+
+def is_supported_monitored_file(path):
+    if is_temporary_download_path(path):
+        return False
+    if is_supported_file is None:
+        return True
+    try:
+        return bool(is_supported_file(path))
+    except Exception:
+        return False
 
 
 class SandboxDownloadMonitor(object):
@@ -211,6 +225,8 @@ class SandboxDownloadMonitor(object):
         host_out_file = os.path.join(host_out_dir, safe_file_name)
         wsb_path = os.path.join(session_dir, "sandbox.wsb")
         init_cmd_path = os.path.join(session_dir, "sandbox_init.cmd")
+        approve_marker = os.path.join(session_dir, SESSION_APPROVE_MARKER)
+        reject_marker = os.path.join(session_dir, SESSION_REJECT_MARKER)
 
         return {
             "id": session_id,
@@ -221,6 +237,8 @@ class SandboxDownloadMonitor(object):
             "host_out_file": host_out_file,
             "wsb_path": wsb_path,
             "init_cmd_path": init_cmd_path,
+            "approve_marker": approve_marker,
+            "reject_marker": reject_marker,
             "file_name": safe_file_name,
         }
 
@@ -303,15 +321,23 @@ class SandboxDownloadMonitor(object):
 
         self._log_action("SANDBOX_STOPPED", session_id)
 
-    def _wait_for_file_removed(self, path, timeout_seconds):
+    def _wait_for_session_resolution(self, session, timeout_seconds):
         start_time = time.time()
         while self.running and not self.shutdown_requested:
-            if not os.path.exists(path):
-                return True
+            if os.path.exists(session["approve_marker"]):
+                return "approved"
+            if os.path.exists(session["reject_marker"]):
+                return "rejected"
+            if not os.path.exists(session["host_in_file"]):
+                return "removed"
             if time.time() - start_time > timeout_seconds:
-                return False
+                return "timeout"
             time.sleep(0.5)
-        return not os.path.exists(path)
+        if os.path.exists(session["approve_marker"]):
+            return "approved"
+        if os.path.exists(session["reject_marker"]):
+            return "rejected"
+        return "removed" if not os.path.exists(session["host_in_file"]) else "timeout"
 
     def _decision_to_result(self, decision):
         if decision == "BLOCKED":
@@ -337,7 +363,7 @@ class SandboxDownloadMonitor(object):
             for entry in os.scandir(STAGING_DIR):
                 if not entry.is_file():
                     continue
-                if is_temporary_download_path(entry.path):
+                if not is_supported_monitored_file(entry.path):
                     continue
                 try:
                     stat = entry.stat()
@@ -353,7 +379,7 @@ class SandboxDownloadMonitor(object):
             for entry in os.scandir(STAGING_DIR):
                 if not entry.is_file():
                     continue
-                if is_temporary_download_path(entry.path):
+                if not is_supported_monitored_file(entry.path):
                     continue
                 try:
                     stat = entry.stat()
@@ -390,7 +416,7 @@ class SandboxDownloadMonitor(object):
         sandbox_process = None
 
         try:
-            if is_temporary_download_path(absolute_path):
+            if not is_supported_monitored_file(absolute_path):
                 return
             if not os.path.exists(absolute_path):
                 return
@@ -438,9 +464,9 @@ class SandboxDownloadMonitor(object):
                 SANDBOX_GUEST_IN_DIR,
             ))
 
-            removed = self._wait_for_file_removed(session["host_in_file"], SANDBOX_RELEASE_WAIT_SECONDS)
-            if not removed:
-                print("[WARN] Timed out waiting for file removal in sandbox: {0}".format(file_name))
+            resolution = self._wait_for_session_resolution(session, SANDBOX_RELEASE_WAIT_SECONDS)
+            if resolution == "timeout":
+                print("[WARN] Timed out waiting for sandbox action: {0}".format(file_name))
             else:
                 self._log_action("FILE_REMOVED_FROM_SANDBOX", session["host_in_file"])
 
@@ -450,7 +476,9 @@ class SandboxDownloadMonitor(object):
                     self._log_action("USER_ALLOWED", final_target)
                 else:
                     print("[WARN] Failed to move approved file to Downloads: {0}".format(file_name))
-            elif removed:
+            elif resolution == "approved":
+                self._log_action("USER_ALLOWED", file_name)
+            elif resolution in {"rejected", "removed"}:
                 self._log_action("USER_REJECTED", file_name)
 
         except Exception as exc:
@@ -564,3 +592,6 @@ class SandboxDownloadMonitor(object):
 if __name__ == "__main__":
     app = SandboxDownloadMonitor()
     app.run()
+
+
+

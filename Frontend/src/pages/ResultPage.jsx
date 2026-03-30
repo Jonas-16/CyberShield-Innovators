@@ -3,6 +3,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 const API_BASE_URL = import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:8000';
 const CLEARED_RESULT_KEY = 'clearedResultMarker';
 const LATEST_POLL_INTERVAL_MS = 5000;
+const TERMINAL_POST_ACTIONS = new Set(['approved_via_result_page', 'rejected_via_result_page', 'deleted']);
 
 function resultClass(result) {
   if (result === 'No file selected') return 'overall warn';
@@ -19,7 +20,15 @@ function getErrorMessage(error) {
 }
 
 function buildMarker(payload) {
-  return `${payload?.file_name || ''}:${payload?.ts || ''}:${payload?.post_action || ''}`;
+  const base = payload?.scan_result && typeof payload.scan_result === 'object'
+    ? {
+        ...payload.scan_result,
+        file_name: payload?.file_name || payload.scan_result?.file_name,
+        path: payload?.staging_path || payload.scan_result?.path,
+      }
+    : payload;
+
+  return `${base?.file_name || ''}:${base?.ts || ''}:${base?.post_action || ''}:${base?.path || ''}`;
 }
 
 function buildLatestPayload(payload) {
@@ -29,6 +38,10 @@ function buildLatestPayload(payload) {
     overall_result: payload.overall_result,
     status: payload.post_action || 'logged'
   };
+}
+
+function isTerminalPayload(payload) {
+  return TERMINAL_POST_ACTIONS.has(payload?.post_action || '');
 }
 
 export default function ResultPage({ overallResult }) {
@@ -55,6 +68,9 @@ export default function ResultPage({ overallResult }) {
         const response = await fetch(`${API_BASE_URL}/api/scan/latest`);
         if (!response.ok) return;
         const payload = await response.json();
+        if (isTerminalPayload(payload)) {
+          return;
+        }
         const clearedMarker = localStorage.getItem(CLEARED_RESULT_KEY);
         const marker = buildMarker(payload);
         if (clearedMarker && clearedMarker === marker) {
@@ -84,7 +100,7 @@ export default function ResultPage({ overallResult }) {
         if (!response.ok) return;
 
         const payload = await response.json();
-        if (!active) return;
+        if (!active || isTerminalPayload(payload)) return;
 
         const clearedMarker = localStorage.getItem(CLEARED_RESULT_KEY);
         const marker = buildMarker(payload);
@@ -125,6 +141,10 @@ export default function ResultPage({ overallResult }) {
             const latestResponse = await fetch(`${API_BASE_URL}/api/scan/latest`);
             if (latestResponse.ok) {
               const latestPayload = await latestResponse.json();
+              if (isTerminalPayload(latestPayload)) {
+                setMessage('No file is currently available in sandbox.');
+                return;
+              }
               const clearedMarker = localStorage.getItem(CLEARED_RESULT_KEY);
               const marker = buildMarker(latestPayload);
               if (!clearedMarker || clearedMarker !== marker) {
@@ -162,6 +182,12 @@ export default function ResultPage({ overallResult }) {
   const warningText = scan?.scanner_warning
     ? 'ML engine is unavailable; running heuristic fallback mode.'
     : '';
+  const isActiveSandboxReview = Boolean(
+    hasFile &&
+    !isManualUpload &&
+    scan?.source === 'download-monitor' &&
+    postAction === 'manual_review_required'
+  );
   const showSaveButton = hasFile && !isManualUpload && postAction !== 'auto_saved_safe' && postAction !== 'auto_deleted_blocked';
   const showDeleteButton = hasFile && ((!isManualUpload && postAction !== 'auto_saved_safe' && postAction !== 'auto_deleted_blocked') || (isManualUpload && !postAction && resultText !== 'Safe'));
   const showClearButton = hasFile;
@@ -178,6 +204,17 @@ export default function ResultPage({ overallResult }) {
     const warnTag = scan.scanner_warning ? 'Model: Fallback mode' : 'Model: Active';
     return [decisionTag, engineTag, riskTag, warnTag];
   }, [scan, risk]);
+
+  const clearCurrentResult = (nextMessage) => {
+    const marker = buildMarker(scan || fileInfo || {});
+    if (marker !== ':::') {
+      localStorage.setItem(CLEARED_RESULT_KEY, marker);
+    }
+    localStorage.removeItem('latestSandboxFile');
+    setFileInfo(null);
+    setIsManualUpload(false);
+    setMessage(nextMessage);
+  };
 
   const saveFile = async () => {
     if (!fileInfo?.file_name) {
@@ -212,11 +249,25 @@ export default function ResultPage({ overallResult }) {
         URL.revokeObjectURL(url);
       }
 
-      await fetch(`${API_BASE_URL}/api/scan/files/${encodeURIComponent(fileInfo.file_name)}`, { method: 'DELETE' });
-      localStorage.removeItem('latestSandboxFile');
-      setFileInfo(null);
-      setIsManualUpload(false);
-      setMessage('File saved and removed from sandbox.');
+      if (isActiveSandboxReview) {
+        const approveResponse = await fetch(`${API_BASE_URL}/api/scan/files/${encodeURIComponent(fileInfo.file_name)}/approve`, {
+          method: 'POST'
+        });
+        if (!approveResponse.ok) {
+          const payload = await approveResponse.json();
+          throw new Error(payload?.detail || 'Failed to approve file');
+        }
+        clearCurrentResult('File saved, removed from the sandbox, and the sandbox session will now close.');
+        return;
+      }
+
+      const deleteResponse = await fetch(`${API_BASE_URL}/api/scan/files/${encodeURIComponent(fileInfo.file_name)}`, { method: 'DELETE' });
+      if (!deleteResponse.ok) {
+        const payload = await deleteResponse.json();
+        throw new Error(payload?.detail || 'Failed to remove file after save');
+      }
+
+      clearCurrentResult('File saved and removed from sandbox.');
     } catch (error) {
       setMessage(getErrorMessage(error));
     } finally {
@@ -234,6 +285,18 @@ export default function ResultPage({ overallResult }) {
     setMessage('Deleting file from sandbox...');
 
     try {
+      if (isActiveSandboxReview) {
+        const response = await fetch(`${API_BASE_URL}/api/scan/files/${encodeURIComponent(fileInfo.file_name)}/reject`, {
+          method: 'POST'
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+          throw new Error(payload?.detail || 'Reject failed');
+        }
+        clearCurrentResult(`Deleted: ${payload.file_name}. The sandbox session will now close.`);
+        return;
+      }
+
       const response = await fetch(`${API_BASE_URL}/api/scan/files/${encodeURIComponent(fileInfo.file_name)}`, {
         method: 'DELETE'
       });
@@ -242,10 +305,7 @@ export default function ResultPage({ overallResult }) {
         throw new Error(payload?.detail || 'Delete failed');
       }
 
-      localStorage.removeItem('latestSandboxFile');
-      setFileInfo(null);
-      setIsManualUpload(false);
-      setMessage(
+      clearCurrentResult(
         isManualUpload
           ? `Deleted sandbox copy: ${payload.file_name}. Original uploaded file remains in its source folder.`
           : `Deleted: ${payload.file_name}`
@@ -258,12 +318,7 @@ export default function ResultPage({ overallResult }) {
   };
 
   const clearResults = () => {
-    const marker = buildMarker(scan || fileInfo || {});
-    localStorage.setItem(CLEARED_RESULT_KEY, marker);
-    localStorage.removeItem('latestSandboxFile');
-    setFileInfo(null);
-    setIsManualUpload(false);
-    setMessage('Results cleared.');
+    clearCurrentResult('Results cleared.');
   };
 
   return (
@@ -304,6 +359,9 @@ export default function ResultPage({ overallResult }) {
         )}
       </div>
       {fileInfo?.file_name && <p className="scan-file">Sandbox file: {fileInfo.file_name}</p>}
+      {isActiveSandboxReview && (
+        <p className="scan-message">Save will store the file in a folder you choose, remove it from the sandbox, and then close the sandbox. Delete will reject it and close the sandbox.</p>
+      )}
       {message && <p className="scan-message">{message}</p>}
     </section>
   );
