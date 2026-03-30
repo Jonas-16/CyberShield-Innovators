@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from functools import lru_cache
 from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
@@ -113,6 +114,7 @@ def _patch_lief_for_ember() -> None:
             setattr(lief, name, Exception)
 
 
+@lru_cache(maxsize=1)
 def _init_ember_raw_extractor():
     _patch_numpy_for_legacy_ember()
     _patch_sklearn_hasher_for_ember()
@@ -126,11 +128,83 @@ def _init_ember_raw_extractor():
     return PEFeatureExtractor(feature_version=2)
 
 
+@lru_cache(maxsize=1)
 def _load_normalization() -> tuple[np.ndarray | None, np.ndarray | None]:
     if not NORM_PATH.exists():
         return None, None
     data = np.load(NORM_PATH)
     return data.get("mean"), data.get("std")
+
+
+@lru_cache(maxsize=1)
+def _load_model_bundle():
+    try:
+        import torch
+    except Exception as exc:
+        raise ScannerStageError("import_torch", str(exc))
+
+    try:
+        from .model_def import ZeroDayDetector
+    except Exception as exc:
+        raise ScannerStageError("import_model_def", str(exc))
+
+    try:
+        extractor = _init_ember_raw_extractor()
+    except Exception as exc:
+        raise ScannerStageError("init_extractor", str(exc))
+
+    try:
+        mean, std = _load_normalization()
+    except Exception as exc:
+        raise ScannerStageError("load_normalization", str(exc))
+
+    input_dim = extractor.dim if mean is None else int(mean.shape[0])
+
+    if not MODEL_PATH.exists():
+        raise ScannerStageError("model_file", f"Model not found: {MODEL_PATH}")
+
+    try:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model = ZeroDayDetector(input_dim).to(device)
+    except Exception as exc:
+        raise ScannerStageError("init_model", str(exc))
+
+    try:
+        try:
+            checkpoint = torch.load(str(MODEL_PATH), map_location=device, weights_only=True)
+        except TypeError:
+            checkpoint = torch.load(str(MODEL_PATH), map_location=device)
+    except Exception as exc:
+        raise ScannerStageError("load_checkpoint", str(exc))
+
+    state_dict = checkpoint
+    if isinstance(checkpoint, dict):
+        if "state_dict" in checkpoint:
+            state_dict = checkpoint["state_dict"]
+        elif "model_state_dict" in checkpoint:
+            state_dict = checkpoint["model_state_dict"]
+
+    try:
+        missing, unexpected = model.load_state_dict(state_dict, strict=False)
+        if missing or unexpected:
+            raise ScannerStageError(
+                "model_state_mismatch",
+                f"missing={len(missing)}, unexpected={len(unexpected)}",
+            )
+        model.eval()
+    except ScannerStageError:
+        raise
+    except Exception as exc:
+        raise ScannerStageError("load_state_dict", str(exc))
+
+    return {
+        "torch": torch,
+        "device": device,
+        "model": model,
+        "extractor": extractor,
+        "mean": mean,
+        "std": std,
+    }
 
 
 def _extract_features(file_path: Path, extractor) -> np.ndarray:
@@ -200,63 +274,18 @@ def _ml_scan(
     fusion_alpha: float,
 ) -> dict[str, Any]:
     try:
-        import torch
+        bundle = _load_model_bundle()
     except Exception as exc:
-        raise ScannerStageError("import_torch", str(exc))
+        if isinstance(exc, ScannerStageError):
+            raise
+        raise ScannerStageError("load_model_bundle", str(exc))
 
-    try:
-        from .model_def import ZeroDayDetector
-    except Exception as exc:
-        raise ScannerStageError("import_model_def", str(exc))
-
-    try:
-        extractor = _init_ember_raw_extractor()
-    except Exception as exc:
-        raise ScannerStageError("init_extractor", str(exc))
-
-    try:
-        mean, std = _load_normalization()
-    except Exception as exc:
-        raise ScannerStageError("load_normalization", str(exc))
-
-    input_dim = extractor.dim if mean is None else int(mean.shape[0])
-
-    if not MODEL_PATH.exists():
-        raise ScannerStageError("model_file", f"Model not found: {MODEL_PATH}")
-
-    try:
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        model = ZeroDayDetector(input_dim).to(device)
-    except Exception as exc:
-        raise ScannerStageError("init_model", str(exc))
-
-    try:
-        try:
-            checkpoint = torch.load(str(MODEL_PATH), map_location=device, weights_only=True)
-        except TypeError:
-            checkpoint = torch.load(str(MODEL_PATH), map_location=device)
-    except Exception as exc:
-        raise ScannerStageError("load_checkpoint", str(exc))
-
-    state_dict = checkpoint
-    if isinstance(checkpoint, dict):
-        if "state_dict" in checkpoint:
-            state_dict = checkpoint["state_dict"]
-        elif "model_state_dict" in checkpoint:
-            state_dict = checkpoint["model_state_dict"]
-
-    try:
-        missing, unexpected = model.load_state_dict(state_dict, strict=False)
-        if missing or unexpected:
-            raise ScannerStageError(
-                "model_state_mismatch",
-                f"missing={len(missing)}, unexpected={len(unexpected)}",
-            )
-        model.eval()
-    except ScannerStageError:
-        raise
-    except Exception as exc:
-        raise ScannerStageError("load_state_dict", str(exc))
+    torch = bundle["torch"]
+    device = bundle["device"]
+    model = bundle["model"]
+    extractor = bundle["extractor"]
+    mean = bundle["mean"]
+    std = bundle["std"]
 
     try:
         features = _extract_features(file_path, extractor)
@@ -368,20 +397,15 @@ def ml_stack_status() -> dict[str, Any]:
         status["errors"].append(f"torch: {exc}")
 
     try:
-        _patch_numpy_for_legacy_ember()
-        _patch_sklearn_hasher_for_ember()
-        _patch_lief_for_ember()
-        from ember.features import PEFeatureExtractor  # noqa: F401
-        PEFeatureExtractor(feature_version=2)
+        _load_model_bundle()
         status["ember"] = True
-    except Exception as exc:
-        status["errors"].append(f"ember: {exc}")
-
-    try:
-        import lief  # noqa: F401
+        status["torch"] = True
         status["lief"] = True
     except Exception as exc:
-        status["errors"].append(f"lief: {exc}")
+        if isinstance(exc, ScannerStageError):
+            status["errors"].append(f"{exc.stage}: {exc}")
+        else:
+            status["errors"].append(f"load_bundle: {exc}")
 
     status["ready"] = bool(
         status["model_exists"]

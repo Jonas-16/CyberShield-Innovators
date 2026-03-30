@@ -33,6 +33,7 @@ SANDBOX_GUEST_OUT_DIR = SANDBOX_GUEST_MOUNT_DIR + r"\out"
 SANDBOX_STARTUP_GRACE_SECONDS = 5
 SANDBOX_RELEASE_WAIT_SECONDS = 1800
 SANDBOX_SHUTDOWN_TIMEOUT_SECONDS = 30
+SANDBOX_GUEST_EXIT_GRACE_SECONDS = 20
 SESSION_CLEANUP_RETRIES = 5
 
 POLL_INTERVAL_SECONDS = 2
@@ -225,6 +226,7 @@ class SandboxDownloadMonitor(object):
         host_out_file = os.path.join(host_out_dir, safe_file_name)
         wsb_path = os.path.join(session_dir, "sandbox.wsb")
         init_cmd_path = os.path.join(session_dir, "sandbox_init.cmd")
+        guest_watch_path = os.path.join(session_dir, "sandbox_watch.ps1")
         approve_marker = os.path.join(session_dir, SESSION_APPROVE_MARKER)
         reject_marker = os.path.join(session_dir, SESSION_REJECT_MARKER)
 
@@ -237,12 +239,32 @@ class SandboxDownloadMonitor(object):
             "host_out_file": host_out_file,
             "wsb_path": wsb_path,
             "init_cmd_path": init_cmd_path,
+            "guest_watch_path": guest_watch_path,
             "approve_marker": approve_marker,
             "reject_marker": reject_marker,
             "file_name": safe_file_name,
         }
 
     def _write_session_files(self, session):
+        guest_watch = (
+            "$approve = \"{0}\"\r\n"
+            "$reject = \"{1}\"\r\n"
+            "while ($true) {{\r\n"
+            "  if ((Test-Path $approve) -or (Test-Path $reject)) {{\r\n"
+            "    Start-Sleep -Seconds 2\r\n"
+            "    Stop-Process -Name explorer -ErrorAction SilentlyContinue\r\n"
+            "    shutdown.exe /s /t 0\r\n"
+            "    break\r\n"
+            "  }}\r\n"
+            "  Start-Sleep -Milliseconds 500\r\n"
+            "}}\r\n"
+        ).format(
+            SANDBOX_GUEST_MOUNT_DIR + "\\" + SESSION_APPROVE_MARKER,
+            SANDBOX_GUEST_MOUNT_DIR + "\\" + SESSION_REJECT_MARKER,
+        )
+        with open(session["guest_watch_path"], "w", encoding="utf-8") as handle:
+            handle.write(guest_watch)
+
         init_cmd = (
             "@echo off\r\n"
             "title Sandbox Session\r\n"
@@ -251,12 +273,14 @@ class SandboxDownloadMonitor(object):
             "echo Input file path: {1}\\{2}\r\n"
             "echo To approve, move file to: {3}\r\n"
             "echo To reject, delete file from: {1}\r\n"
+            "start \"\" powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"{4}\"\r\n"
             "start \"\" explorer.exe \"{1}\"\r\n"
         ).format(
             SANDBOX_GUEST_OUT_DIR,
             SANDBOX_GUEST_IN_DIR,
             session["file_name"],
             SANDBOX_GUEST_OUT_DIR,
+            SANDBOX_GUEST_MOUNT_DIR + r"\sandbox_watch.ps1",
         )
         with open(session["init_cmd_path"], "w", encoding="utf-8") as handle:
             handle.write(init_cmd)
@@ -320,6 +344,15 @@ class SandboxDownloadMonitor(object):
                 pass
 
         self._log_action("SANDBOX_STOPPED", session_id)
+
+    def _wait_for_sandbox_exit(self, process, timeout_seconds):
+        if not process:
+            return True
+        try:
+            process.wait(timeout=timeout_seconds)
+            return True
+        except Exception:
+            return process.poll() is not None
 
     def _wait_for_session_resolution(self, session, timeout_seconds):
         start_time = time.time()
@@ -469,6 +502,9 @@ class SandboxDownloadMonitor(object):
                 print("[WARN] Timed out waiting for sandbox action: {0}".format(file_name))
             else:
                 self._log_action("FILE_REMOVED_FROM_SANDBOX", session["host_in_file"])
+
+            if resolution in {"approved", "rejected", "removed"}:
+                self._wait_for_sandbox_exit(sandbox_process, SANDBOX_GUEST_EXIT_GRACE_SECONDS)
 
             if os.path.exists(session["host_out_file"]):
                 final_target = self._get_unique_destination(DOWNLOADS_DIR, file_name)

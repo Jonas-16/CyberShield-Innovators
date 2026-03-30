@@ -12,7 +12,7 @@ from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from starlette.concurrency import run_in_threadpool
-from app.scanner import SCAN_LOG_FILE, is_supported_file, ml_stack_status, scan_file, write_scan_event
+from app.scanner import SCAN_LOG_FILE, is_supported_file, ml_stack_status, preload_ml_stacks, scan_file, write_scan_event
 
 DOWNLOAD_WATCH_DIR = Path(os.environ.get("SANDBOX_STAGING_DIR", r"D:\\Download"))
 MANUAL_UPLOAD_DIR = Path(os.environ.get("MANUAL_UPLOAD_DIR", r"C:\\Sandbox_ManualUploads"))
@@ -38,6 +38,10 @@ def ensure_staging_dir() -> None:
     MANUAL_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def iso_utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
 def safe_unique_path(original_name: str) -> Path:
     file_name = Path(original_name).name or "upload.bin"
     target = MANUAL_UPLOAD_DIR / file_name
@@ -56,12 +60,47 @@ def staging_path_for(file_name: str) -> Path:
     return MANUAL_UPLOAD_DIR / safe_name
 
 
+KNOWN_RESULTS = {"Safe", "Suspicious", "Malicious"}
+
+
 def decision_to_result(decision: str) -> str:
-    if decision == "BLOCKED":
+    normalized = str(decision or "").upper()
+    if normalized == "BLOCKED":
         return "Malicious"
-    if decision == "UNCERTAIN":
+    if normalized in {"UNCERTAIN", "STEGO"}:
         return "Suspicious"
+    if normalized in {"ALLOWED", "COVER"}:
+        return "Safe"
     return "Safe"
+
+
+def overall_result_for(payload: dict[str, Any] | None) -> str:
+    data = payload or {}
+    explicit = str(data.get("overall_result", "") or "")
+
+    predicted_label = str(data.get("predicted_label", "") or "").strip().lower()
+    if predicted_label == "stego":
+        return "Suspicious"
+
+    decision = str(data.get("decision", "") or "")
+    if decision:
+        return decision_to_result(decision)
+
+    engine = str(data.get("engine", "") or "").strip().lower()
+    risk = data.get("fused_risk")
+    if isinstance(risk, (int, float)):
+        if engine == "stg-ml":
+            return "Suspicious" if float(risk) >= 0.5 else "Safe"
+        if float(risk) >= 0.8:
+            return "Malicious"
+        if float(risk) >= 0.2:
+            return "Suspicious"
+        return "Safe"
+
+    if explicit in KNOWN_RESULTS:
+        return explicit
+
+    return "Suspicious"
 
 
 def parse_event_ts(value: Any) -> datetime | None:
@@ -112,20 +151,23 @@ def process_staged_file(target_path: Path) -> dict[str, Any]:
             "scanner_warning": str(exc),
         }
 
-    overall_result = decision_to_result(scan_result.get("decision", "UNCERTAIN"))
+    overall_result = overall_result_for(scan_result)
     payload = {
-        "status": "queued",
+        "status": "completed",
         "file_name": target_path.name,
         "staging_path": str(target_path),
         "size_bytes": target_path.stat().st_size if target_path.exists() else 0,
         "scan_result": scan_result,
         "overall_result": overall_result,
+        "source": "manual-upload",
+        "ts": str(scan_result.get("ts") or iso_utc_now()),
     }
     SCAN_RESULTS[target_path.name] = payload
     return payload
 
 
 def start_background_scan(target_path: Path, size_bytes: int) -> dict[str, Any]:
+    submitted_at = iso_utc_now()
     payload = {
         "status": "processing",
         "file_name": target_path.name,
@@ -133,6 +175,8 @@ def start_background_scan(target_path: Path, size_bytes: int) -> dict[str, Any]:
         "size_bytes": size_bytes,
         "scan_result": None,
         "overall_result": None,
+        "source": "manual-upload",
+        "ts": submitted_at,
     }
     SCAN_RESULTS[target_path.name] = payload
 
@@ -140,6 +184,7 @@ def start_background_scan(target_path: Path, size_bytes: int) -> dict[str, Any]:
         try:
             final_payload = process_staged_file(target_path)
             final_payload["size_bytes"] = size_bytes
+            final_payload["ts"] = str(final_payload.get("ts") or submitted_at)
             SCAN_RESULTS[target_path.name] = final_payload
         except Exception as exc:
             SCAN_RESULTS[target_path.name] = {
@@ -155,6 +200,8 @@ def start_background_scan(target_path: Path, size_bytes: int) -> dict[str, Any]:
                     "scanner_warning": str(exc),
                 },
                 "overall_result": "Suspicious",
+                "source": "manual-upload",
+                "ts": iso_utc_now(),
             }
 
     threading.Thread(target=_worker, name=f"scan-{target_path.name}", daemon=True).start()
@@ -177,7 +224,7 @@ def read_scan_logs(
     if not include_follow_up:
         events = [event for event in events if str(event.get("post_action", "")) not in TERMINAL_POST_ACTIONS]
     for event in events:
-        event["overall_result"] = decision_to_result(str(event.get("decision", "UNCERTAIN")))
+        event["overall_result"] = overall_result_for(event)
     events.sort(key=lambda item: str(item.get("ts", "")), reverse=True)
     return events[:limit]
 
@@ -200,7 +247,7 @@ def find_logged_event(file_name: str) -> dict[str, Any] | None:
             continue
         latest_match = event
     if latest_match:
-        latest_match["overall_result"] = decision_to_result(str(latest_match.get("decision", "UNCERTAIN")))
+        latest_match["overall_result"] = overall_result_for(latest_match)
     return latest_match
 
 
@@ -256,6 +303,40 @@ def clear_result_state(file_name: str) -> None:
     SCAN_RESULTS.pop(Path(file_name).name, None)
 
 
+def _sort_key_for_event(payload: dict[str, Any]) -> datetime:
+    return parse_event_ts(payload.get("ts")) or datetime.min.replace(tzinfo=timezone.utc)
+
+
+def get_latest_active_result() -> dict[str, Any] | None:
+    if not SCAN_RESULTS:
+        return None
+
+    items = [dict(item) for item in SCAN_RESULTS.values()]
+    if not items:
+        return None
+
+    items.sort(key=_sort_key_for_event, reverse=True)
+    return items[0]
+
+
+def get_latest_known_result() -> dict[str, Any] | None:
+    candidates: list[dict[str, Any]] = []
+
+    latest_active = get_latest_active_result()
+    if latest_active:
+        candidates.append(latest_active)
+
+    latest_log = get_latest_log_event(current_session_only=True)
+    if latest_log:
+        candidates.append(latest_log)
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=_sort_key_for_event, reverse=True)
+    return candidates[0]
+
+
 def log_follow_up_event(file_name: str, action: str, message: str) -> None:
     latest = find_logged_event(file_name)
     if not latest:
@@ -271,6 +352,7 @@ def log_follow_up_event(file_name: str, action: str, message: str) -> None:
 @app.on_event("startup")
 def on_startup() -> None:
     ensure_staging_dir()
+    threading.Thread(target=preload_ml_stacks, name="ml-prewarm", daemon=True).start()
 
 
 @app.get("/api/health")
@@ -356,7 +438,7 @@ def get_scan_logs(limit: int = Query(default=50, ge=1, le=500)) -> dict[str, Any
 
 @app.get("/api/scan/latest")
 def get_latest_scan_result() -> dict[str, Any]:
-    latest = get_latest_log_event(current_session_only=True)
+    latest = get_latest_known_result()
     if not latest:
         raise HTTPException(status_code=404, detail="No scan results available in this session")
     return latest

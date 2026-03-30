@@ -7,6 +7,7 @@ const TERMINAL_POST_ACTIONS = new Set(['approved_via_result_page', 'rejected_via
 
 function resultClass(result) {
   if (result === 'No file selected') return 'overall warn';
+  if (result === 'Processing') return 'overall warn';
   if (result === 'Malicious') return 'overall bad';
   if (result === 'Suspicious') return 'overall warn';
   return 'overall safe';
@@ -32,6 +33,10 @@ function buildMarker(payload) {
 }
 
 function buildLatestPayload(payload) {
+  if (payload?.scan_result || payload?.status) {
+    return payload;
+  }
+
   return {
     file_name: payload.file_name,
     scan_result: payload,
@@ -42,6 +47,14 @@ function buildLatestPayload(payload) {
 
 function isTerminalPayload(payload) {
   return TERMINAL_POST_ACTIONS.has(payload?.post_action || '');
+}
+
+function isPendingPayload(payload) {
+  return payload?.status === 'processing' || payload?.status === 'queued';
+}
+
+function formatPercent(value) {
+  return typeof value === 'number' ? `${(value * 100).toFixed(2)}%` : '-';
 }
 
 export default function ResultPage({ overallResult }) {
@@ -129,10 +142,13 @@ export default function ResultPage({ overallResult }) {
     const fileName = fileInfo?.file_name;
     if (!fileName || !isManualUpload) return;
 
+    let active = true;
+
     const refresh = async () => {
       try {
         const response = await fetch(`${API_BASE_URL}/api/scan/results/${encodeURIComponent(fileName)}`);
         if (response.status === 404) {
+          if (!active) return;
           localStorage.removeItem('latestSandboxFile');
           setFileInfo(null);
           setIsManualUpload(false);
@@ -162,23 +178,38 @@ export default function ResultPage({ overallResult }) {
         }
         if (!response.ok) return;
         const payload = await response.json();
+        if (!active) return;
         setFileInfo(payload);
         setIsManualUpload(true);
         localStorage.setItem('latestSandboxFile', JSON.stringify(payload));
+        if (isPendingPayload(payload)) {
+          setMessage(`Scanning ${payload.file_name}...`);
+        } else if (payload?.status === 'failed') {
+          setMessage(`Scan failed: ${payload.file_name}`);
+        } else {
+          setMessage(payload?.message || '');
+        }
       } catch (_) {
         // keep cached result when backend is unavailable
       }
     };
 
     refresh();
+    const timer = setInterval(refresh, 2000);
+
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
   }, [fileInfo?.file_name, isManualUpload]);
 
   const scan = fileInfo?.scan_result || null;
   const hasFile = Boolean(fileInfo?.file_name);
+  const isProcessing = isPendingPayload(fileInfo);
   const postAction = scan?.post_action || null;
   const risk = typeof scan?.fused_risk === 'number' ? scan.fused_risk : null;
-  const score = !hasFile ? null : (risk === null ? 50 : Math.max(1, Math.min(99, Math.round((1 - risk) * 100))));
-  const resultText = hasFile ? (fileInfo?.overall_result || overallResult) : 'No file selected';
+  const score = !hasFile || isProcessing ? null : (risk === null ? 50 : Math.max(1, Math.min(99, Math.round((1 - risk) * 100))));
+  const resultText = !hasFile ? 'No file selected' : (isProcessing ? 'Processing' : (fileInfo?.overall_result || overallResult || 'Suspicious'));
   const warningText = scan?.scanner_warning
     ? 'ML engine is unavailable; running heuristic fallback mode.'
     : '';
@@ -189,7 +220,7 @@ export default function ResultPage({ overallResult }) {
     postAction === 'manual_review_required'
   );
   const showSaveButton = hasFile && !isManualUpload && postAction !== 'auto_saved_safe' && postAction !== 'auto_deleted_blocked';
-  const showDeleteButton = hasFile && ((!isManualUpload && postAction !== 'auto_saved_safe' && postAction !== 'auto_deleted_blocked') || (isManualUpload && !postAction && resultText !== 'Safe'));
+  const showDeleteButton = hasFile && !isProcessing && ((!isManualUpload && postAction !== 'auto_saved_safe' && postAction !== 'auto_deleted_blocked') || (isManualUpload && !postAction && resultText !== 'Safe'));
   const showClearButton = hasFile;
   const canDelete = showDeleteButton;
 
@@ -204,6 +235,20 @@ export default function ResultPage({ overallResult }) {
     const warnTag = scan.scanner_warning ? 'Model: Fallback mode' : 'Model: Active';
     return [decisionTag, engineTag, riskTag, warnTag];
   }, [scan, risk]);
+
+  const detailRows = useMemo(() => {
+    if (!scan) return [];
+
+    return [
+      { label: 'Decision', value: scan?.decision || '-' },
+      { label: 'Prediction', value: scan?.predicted_label || '-' },
+      { label: 'Confidence', value: formatPercent(scan?.confidence) },
+      { label: 'Stego Probability', value: formatPercent(scan?.stego_prob) },
+      { label: 'Cover Probability', value: formatPercent(scan?.cover_prob) },
+      { label: 'Risk Score', value: risk === null ? '-' : `${(risk * 100).toFixed(2)}%` },
+      { label: 'Source', value: scan?.source || '-' },
+    ].filter((item) => item.value !== '-');
+  }, [risk, scan]);
 
   const clearCurrentResult = (nextMessage) => {
     const marker = buildMarker(scan || fileInfo || {});
@@ -343,6 +388,15 @@ export default function ResultPage({ overallResult }) {
               <span key={tag} className="tag ok">{tag}</span>
             ))}
           </div>
+          {detailRows.length > 0 && (
+            <div className="scan-detail-list">
+              {detailRows.map((detail) => (
+                <p key={detail.label} className="scan-meta">
+                  {detail.label}: {detail.value}
+                </p>
+              ))}
+            </div>
+          )}
           {warningText && <p className="scan-message">{warningText}</p>}
         </article>
       </div>
