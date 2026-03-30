@@ -11,7 +11,7 @@ This FastAPI backend handles:
 Manual uploads are stored in:
 
 ```text
-C:\Sandbox_ManualUploads
+path/to/your/manual-upload-directory
 ```
 
 Scan history is written to:
@@ -115,4 +115,3 @@ Check:
 - `http://127.0.0.1:8000/api/scan/ml-status`
 
 `ready: true` means model files and ML libraries are all available.
-

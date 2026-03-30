@@ -2,14 +2,14 @@
 
 ## What this does
 
-- Watches `D:\Download` in real time
+- Watches your configured download watch folder in real time
 - Ignores temporary and unsupported files
 - Waits for downloads to stabilize before processing
-- Moves supported files into `C:\Sandbox_VM_Input\sessions\<session>\in\<file>`
+- Moves supported files into `path/to/your/sandbox-session-root/sessions/<session>/in/<file>`
 - Scans the file through the backend scanner routing
 - Launches Windows Sandbox for manual review
 - Lets the user approve or reject the sandboxed file
-- Writes sandbox actions to `C:\Sandbox_Logs\sandbox.log`
+- Writes sandbox actions to `path/to/your/sandbox-log-file`
 
 Supported files:
 
@@ -63,23 +63,23 @@ python sandbox_monitor.py
 
 The script auto-creates:
 
-- `D:\Download`
-- `C:\Sandbox_VM_Input`
-- `C:\Sandbox_Logs`
+- `path/to/your/download-watch-directory`
+- `path/to/your/sandbox-session-root`
+- `path/to/your/sandbox-log-directory`
 
 Session folders are created under:
 
 ```text
-C:\Sandbox_VM_Input\sessions
+path/to/your/sandbox-session-root/sessions
 ```
 
 ## Configure app download folders
 
-Set target apps to download into `D:\Download`.
+Set target apps to download into your configured download watch folder.
 
 ## Optional: Redirect the Windows Downloads Folder
 
-If you want broader coverage for apps that save into the default Windows Downloads location, you can redirect the Downloads known folder to `D:\Download`.
+If you want broader coverage for apps that save into the default Windows Downloads location, you can redirect the Downloads known folder to your configured watch folder.
 
 Set Downloads to staging:
 
@@ -103,7 +103,7 @@ Notes:
 
 Log file:
 
-- `C:\Sandbox_Logs\sandbox.log`
+- `path/to/your/sandbox-log-file`
 
 Actions logged include:
 
@@ -132,4 +132,3 @@ pyinstaller --onefile --windowed --name SandboxMonitor sandbox_monitor.py
 Output executable:
 
 - `dist\SandboxMonitor.exe`
-

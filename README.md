@@ -4,7 +4,7 @@ CyberShield Innovators is a malware and steganography scanning system with three
 
 - `Backend/`: FastAPI API for uploads, scanner routing, result lookup, and scan history
 - `Frontend/`: React + Vite UI with Dashboard, Scan, Result, and Logs pages
-- `sandbox/`: Windows Sandbox monitor that intercepts supported downloads from `D:\Download`
+- `sandbox/`: Windows Sandbox monitor that intercepts supported downloads from your configured download watch folder
 
 ## What It Does
 
@@ -29,12 +29,20 @@ The stable top-level router used by the app is:
 Backend/app/scanner.py
 ```
 
+## Main Paths
+
+- Project root: `path/to/your/CyberShield-Innovators`
+- Manual uploads: `path/to/your/manual-upload-directory`
+- Download watch folder: `path/to/your/download-watch-directory`
+- Sandbox session root: `path/to/your/sandbox-session-root/sessions`
+- Sandbox logs: `path/to/your/sandbox-log-file`
+- Scan event log: `Backend/app/reports/scan_events.jsonl`
 ## Run The Full Stack
 
 Start everything from the `sandbox` folder:
 
 ```powershell
-cd "C:\Users\JOSEPH\Desktop\Sem VIII\Project\CyberShield Innovators\sandbox"
+cd path/to/your/CyberShield-Innovators/sandbox
 powershell -ExecutionPolicy Bypass -File .\scripts\Start-BackendAndSandbox.ps1
 ```
 
@@ -102,4 +110,3 @@ powershell -ExecutionPolicy Bypass -File .\scripts\Check-StackHealth.ps1
 - The scanner package under `Backend/app/scanners/` exists for cleanup and maintainability work
 - The running app should continue to route through `Backend/app/scanner.py`
 - If the frontend looks stale after backend/frontend restarts, refresh the browser once
-
