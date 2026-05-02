@@ -8,7 +8,7 @@ from typing import Any
 
 SCAN_LOG_FILE = Path(__file__).resolve().parent / "reports" / "scan_events.jsonl"
 
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".jfif", ".png", ".bmp", ".gif", ".tif", ".tiff", ".webp"}
 ZD_EXTENSIONS = {".exe"}
 SUPPORTED_EXTENSIONS = IMAGE_EXTENSIONS | ZD_EXTENSIONS
 
@@ -89,6 +89,7 @@ def scan_file(file_path: str | Path, log_event: bool = True, **kwargs: Any):
             target,
             image_size=int(kwargs.get("image_size", getattr(module, "DEFAULT_IMAGE_SIZE", 96))),
             stego_threshold=float(kwargs.get("stego_threshold", getattr(module, "DEFAULT_STEGO_THRESHOLD", 0.5))),
+            enable_tta=bool(kwargs.get("enable_tta", getattr(module, "DEFAULT_TTA_ENABLED", False))),
             log_event=False,
         )
         payload = _normalize_image_result(raw_result, module)

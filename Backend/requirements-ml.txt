@@ -15,6 +15,7 @@ lief==0.14.1
 
 # PyTorch runtime (CPU wheel by default on most setups)
 torch==2.5.1
+torchvision==0.20.1
 
 # EMBER feature extractor
 git+https://github.com/elastic/ember.git@master#egg=ember

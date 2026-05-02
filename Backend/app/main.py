@@ -22,6 +22,7 @@ APP_STARTED_AT = datetime.now(timezone.utc)
 SESSION_APPROVE_MARKER = ".approved"
 SESSION_REJECT_MARKER = ".rejected"
 TERMINAL_POST_ACTIONS = {"approved_via_result_page", "rejected_via_result_page", "deleted"}
+PRELOAD_ML_ON_STARTUP = os.environ.get("PRELOAD_ML_ON_STARTUP", "0").strip().lower() in {"1", "true", "yes", "on"}
 
 app = FastAPI(title="Sandbox Upload API", version="1.0.0")
 
@@ -36,6 +37,7 @@ app.add_middleware(
 
 def ensure_staging_dir() -> None:
     MANUAL_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    DOWNLOAD_WATCH_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def iso_utc_now() -> str:
@@ -44,13 +46,13 @@ def iso_utc_now() -> str:
 
 def safe_unique_path(original_name: str) -> Path:
     file_name = Path(original_name).name or "upload.bin"
-    target = MANUAL_UPLOAD_DIR / file_name
+    target = DOWNLOAD_WATCH_DIR / file_name
     if not target.exists():
         return target
 
     stem = Path(file_name).stem
     suffix = Path(file_name).suffix
-    return MANUAL_UPLOAD_DIR / f"{stem}_{uuid4().hex[:8]}{suffix}"
+    return DOWNLOAD_WATCH_DIR / f"{stem}_{uuid4().hex[:8]}{suffix}"
 
 
 def staging_path_for(file_name: str) -> Path:
@@ -166,6 +168,26 @@ def process_staged_file(target_path: Path) -> dict[str, Any]:
     return payload
 
 
+def _log_view_from_active_result(payload: dict[str, Any]) -> dict[str, Any]:
+    scan_result = dict(payload.get("scan_result") or {})
+    if not scan_result:
+        return {
+            "file_name": payload.get("file_name"),
+            "decision": "PENDING",
+            "engine": "pending",
+            "fused_risk": None,
+            "reasons": ["scan in progress"],
+            "ts": payload.get("ts") or iso_utc_now(),
+            "overall_result": "Suspicious",
+        }
+
+    event = dict(scan_result)
+    event.setdefault("file_name", payload.get("file_name"))
+    event.setdefault("ts", payload.get("ts") or scan_result.get("ts") or iso_utc_now())
+    event["overall_result"] = overall_result_for(event)
+    return event
+
+
 def start_background_scan(target_path: Path, size_bytes: int) -> dict[str, Any]:
     submitted_at = iso_utc_now()
     payload = {
@@ -215,6 +237,12 @@ def read_scan_logs(
     include_follow_up: bool = False,
 ) -> list[dict[str, Any]]:
     events = _iter_scan_events()
+    active_items = []
+    for payload in SCAN_RESULTS.values():
+        status = str(payload.get("status") or "")
+        if status in {"processing", "queued", "completed", "failed"}:
+            active_items.append(_log_view_from_active_result(payload))
+    events.extend(active_items)
     if current_session_only:
         events = [
             event
@@ -223,10 +251,15 @@ def read_scan_logs(
         ]
     if not include_follow_up:
         events = [event for event in events if str(event.get("post_action", "")) not in TERMINAL_POST_ACTIONS]
+
+    deduped: dict[tuple[str, str], dict[str, Any]] = {}
     for event in events:
         event["overall_result"] = overall_result_for(event)
-    events.sort(key=lambda item: str(item.get("ts", "")), reverse=True)
-    return events[:limit]
+        key = (str(event.get("file_name", "")), str(event.get("ts", "")))
+        deduped[key] = event
+    items = list(deduped.values())
+    items.sort(key=lambda item: str(item.get("ts", "")), reverse=True)
+    return items[:limit]
 
 
 def get_latest_log_event(current_session_only: bool = False) -> dict[str, Any] | None:
@@ -352,7 +385,8 @@ def log_follow_up_event(file_name: str, action: str, message: str) -> None:
 @app.on_event("startup")
 def on_startup() -> None:
     ensure_staging_dir()
-    threading.Thread(target=preload_ml_stacks, name="ml-prewarm", daemon=True).start()
+    if PRELOAD_ML_ON_STARTUP:
+        threading.Thread(target=preload_ml_stacks, name="ml-prewarm", daemon=True).start()
 
 
 @app.get("/api/health")
@@ -418,7 +452,15 @@ async def upload_to_sandbox(file: UploadFile = File(...)) -> dict[str, Any]:
     finally:
         await file.close()
 
-    return start_background_scan(target_path, total)
+    return {
+        "status": "queued",
+        "file_name": target_path.name,
+        "staging_path": str(target_path),
+        "size_bytes": total,
+        "source": "upload-to-sandbox",
+        "message": "Upload completed. The sandbox monitor will pick up this file from the watch folder.",
+        "ts": iso_utc_now(),
+    }
 
 
 @app.get("/api/scan/results/{file_name}")
@@ -485,13 +527,19 @@ def reject_file(file_name: str) -> dict[str, str]:
 @app.delete("/api/scan/files/{file_name}")
 def delete_file(file_name: str) -> dict[str, str]:
     file_path = resolve_managed_file(file_name)
+    session_dir = resolve_session_dir(file_path)
 
     try:
+        if session_dir:
+            (session_dir / SESSION_REJECT_MARKER).write_text("rejected\n", encoding="utf-8")
         file_path.unlink()
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Delete failed: {exc}")
 
-    log_follow_up_event(file_name, "deleted", "Sandbox copy was deleted.")
+    if session_dir:
+        log_follow_up_event(file_name, "rejected_via_result_page", "File was deleted from the Result page and the sandbox session was closed.")
+    else:
+        log_follow_up_event(file_name, "deleted", "Sandbox copy was deleted.")
     clear_result_state(file_name)
     return {"status": "deleted", "file_name": file_path.name}
 

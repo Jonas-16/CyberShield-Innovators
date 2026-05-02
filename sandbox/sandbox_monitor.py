@@ -100,6 +100,7 @@ class SandboxDownloadMonitor(object):
         self.recently_processed = {}
         self.current_sandbox_process = None
         self.known_file_state = {}
+        self.known_ignored_state = {}
         self.tray_icon = None
 
         self._ensure_directories()
@@ -409,16 +410,22 @@ class SandboxDownloadMonitor(object):
     def _poll_staging_dir(self):
         try:
             current_state = {}
+            current_ignored_state = {}
             for entry in os.scandir(STAGING_DIR):
                 if not entry.is_file():
-                    continue
-                if not is_supported_monitored_file(entry.path):
                     continue
                 try:
                     stat = entry.stat()
                 except OSError:
                     continue
                 state = (stat.st_size, stat.st_mtime)
+                if not is_supported_monitored_file(entry.path):
+                    if not is_temporary_download_path(entry.path):
+                        current_ignored_state[entry.path] = state
+                        previous_ignored = self.known_ignored_state.get(entry.path)
+                        if previous_ignored is None or previous_ignored != state:
+                            print("[INFO] Ignoring unsupported download: {0}".format(entry.path))
+                    continue
                 current_state[entry.path] = state
                 previous_state = self.known_file_state.get(entry.path)
                 if previous_state is None or previous_state != state:
@@ -426,6 +433,7 @@ class SandboxDownloadMonitor(object):
                         if entry.path not in self.active_files and not self._is_in_cooldown(entry.path):
                             self.file_queue.put(entry.path)
             self.known_file_state = current_state
+            self.known_ignored_state = current_ignored_state
             self._prune_cooldowns()
         except OSError as exc:
             print("[WARN] Could not poll staging folder: {0}".format(exc))

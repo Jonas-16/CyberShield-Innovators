@@ -1,10 +1,21 @@
 import React, { useEffect, useMemo, useState } from 'react';
 
-const MANUAL_UPLOAD_ROOT = 'C:\\Sandbox_ManualUploads';
+const SANDBOX_WATCH_ROOT = 'D:\\Download';
 const API_BASE_URL = import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:8000';
 
 function isPendingResult(payload) {
   return payload?.status === 'processing' || payload?.status === 'queued';
+}
+
+function isSandboxQueuedUpload(payload) {
+  if (!payload) return false;
+  const stagingPath = String(payload?.staging_path || '');
+  const scanPath = String(payload?.scan_result?.path || '');
+  return (
+    payload?.source === 'upload-to-sandbox' ||
+    stagingPath.startsWith(SANDBOX_WATCH_ROOT) ||
+    scanPath.startsWith(SANDBOX_WATCH_ROOT)
+  );
 }
 
 function getStatusMessage(payload) {
@@ -16,7 +27,7 @@ function getStatusMessage(payload) {
     return `Scan failed: ${payload?.file_name || 'file'}`;
   }
   if (isPendingResult(payload)) {
-    return `Scanning ${payload?.file_name || 'file'}...`;
+    return payload?.message || `Queued ${payload?.file_name || 'file'} for sandbox review...`;
   }
   return `Scan completed: ${payload?.file_name || 'file'}`;
 }
@@ -59,12 +70,7 @@ export default function ScanPage() {
 
     try {
       const payload = JSON.parse(raw);
-      const stagingPath = String(payload?.staging_path || '');
-      const scanPath = String(payload?.scan_result?.path || '');
-      const isManualUploadResult =
-        stagingPath.startsWith(MANUAL_UPLOAD_ROOT) || scanPath.startsWith(MANUAL_UPLOAD_ROOT);
-
-      if (!isManualUploadResult) {
+      if (!isSandboxQueuedUpload(payload)) {
         return;
       }
 
@@ -79,7 +85,7 @@ export default function ScanPage() {
 
   useEffect(() => {
     const fileName = result?.file_name;
-    if (!fileName || result?.status !== 'processing') {
+    if (!fileName || !isPendingResult(result) || !isSandboxQueuedUpload(result)) {
       return;
     }
 
@@ -87,18 +93,21 @@ export default function ScanPage() {
 
     const poll = async () => {
       try {
-        const response = await fetch(`${API_BASE_URL}/api/scan/results/${encodeURIComponent(fileName)}`);
-        if (!response.ok) {
-          return;
-        }
-
+        const response = await fetch(`${API_BASE_URL}/api/scan/latest`);
+        if (!response.ok) return;
         const payload = await response.json();
         if (!active) {
           return;
         }
 
-        if (payload?.status === 'processing') {
-          setMessage(`Scanning ${fileName}...`);
+        const latestFileName = payload?.file_name || payload?.scan_result?.file_name;
+        if (latestFileName !== fileName) {
+          setMessage(`Waiting for sandbox review of ${fileName}...`);
+          return;
+        }
+
+        if (isPendingResult(payload)) {
+          setMessage(payload?.message || `Waiting for sandbox review of ${fileName}...`);
           return;
         }
 
@@ -137,7 +146,7 @@ export default function ScanPage() {
 
     setSelectedFile({ name: file.name });
     setResult(null);
-    setMessage('Uploading file for manual scanning...');
+      setMessage('Uploading file into the sandbox queue...');
     setIsUploading(true);
 
     const formData = new FormData();
@@ -175,7 +184,7 @@ export default function ScanPage() {
       <h2>Scan Page</h2>
       <p className="page-help">
         Automatic sandboxing works when the browser or app downloads directly into
-        {' '}<strong>D:\Download</strong>. Use this page only if you want to manually submit a file.
+        {' '}<strong>D:\Download</strong>. Uploading here also places the file into that sandbox queue.
       </p>
 
       <div className="card scan-config-card">
@@ -189,8 +198,8 @@ export default function ScanPage() {
       <div className="card upload-card">
         <h3>Manual File Check</h3>
         <label htmlFor="scanFileInput" className="upload-dropzone">
-          <span>{isUploading ? 'Scanning...' : 'Click here to choose a file'}</span>
-          <span className="muted">Manual uploads are scanned directly by the backend.</span>
+          <span>{isUploading ? 'Queueing...' : 'Click here to choose a file'}</span>
+          <span className="muted">Uploaded files are copied into the sandbox watch folder for review.</span>
           <input id="scanFileInput" type="file" onChange={handleFileChange} disabled={isUploading} />
         </label>
         {selectedFile && <p className="scan-file">Selected: {selectedFile.name}</p>}

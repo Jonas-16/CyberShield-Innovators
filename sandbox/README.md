@@ -13,7 +13,7 @@
 
 Supported files:
 
-- images: `.jpg`, `.jpeg`, `.png`, `.bmp`, `.tif`, `.tiff`, `.webp`
+- images: `.jpg`, `.jpeg`, `.jfif`, `.png`, `.bmp`, `.gif`, `.tif`, `.tiff`, `.webp`
 - executables: `.exe`
 
 ## Requirements

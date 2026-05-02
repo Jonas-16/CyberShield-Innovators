@@ -53,6 +53,10 @@ function isPendingPayload(payload) {
   return payload?.status === 'processing' || payload?.status === 'queued';
 }
 
+function isDirectBackendUpload(payload) {
+  return payload?.source === 'manual-upload';
+}
+
 function formatPercent(value) {
   return typeof value === 'number' ? `${(value * 100).toFixed(2)}%` : '-';
 }
@@ -69,7 +73,7 @@ export default function ResultPage({ overallResult }) {
       try {
         const parsed = JSON.parse(raw);
         setFileInfo(parsed);
-        setIsManualUpload(true);
+        setIsManualUpload(isDirectBackendUpload(parsed));
         return;
       } catch (_) {
         localStorage.removeItem('latestSandboxFile');
@@ -180,7 +184,7 @@ export default function ResultPage({ overallResult }) {
         const payload = await response.json();
         if (!active) return;
         setFileInfo(payload);
-        setIsManualUpload(true);
+        setIsManualUpload(isDirectBackendUpload(payload));
         localStorage.setItem('latestSandboxFile', JSON.stringify(payload));
         if (isPendingPayload(payload)) {
           setMessage(`Scanning ${payload.file_name}...`);
@@ -216,7 +220,7 @@ export default function ResultPage({ overallResult }) {
   const isActiveSandboxReview = Boolean(
     hasFile &&
     !isManualUpload &&
-    scan?.source === 'download-monitor' &&
+    fileInfo?.source === 'download-monitor' &&
     postAction === 'manual_review_required'
   );
   const showSaveButton = hasFile && !isManualUpload && postAction !== 'auto_saved_safe' && postAction !== 'auto_deleted_blocked';
@@ -246,9 +250,9 @@ export default function ResultPage({ overallResult }) {
       { label: 'Stego Probability', value: formatPercent(scan?.stego_prob) },
       { label: 'Cover Probability', value: formatPercent(scan?.cover_prob) },
       { label: 'Risk Score', value: risk === null ? '-' : `${(risk * 100).toFixed(2)}%` },
-      { label: 'Source', value: scan?.source || '-' },
+      { label: 'Source', value: fileInfo?.source || scan?.source || '-' },
     ].filter((item) => item.value !== '-');
-  }, [risk, scan]);
+  }, [fileInfo?.source, risk, scan]);
 
   const clearCurrentResult = (nextMessage) => {
     const marker = buildMarker(scan || fileInfo || {});
@@ -268,9 +272,21 @@ export default function ResultPage({ overallResult }) {
     }
 
     setIsBusy(true);
-    setMessage('Preparing file for save...');
+    setMessage(isActiveSandboxReview ? 'Saving file back to Downloads...' : 'Preparing file for save...');
 
     try {
+      if (isActiveSandboxReview) {
+        const approveResponse = await fetch(`${API_BASE_URL}/api/scan/files/${encodeURIComponent(fileInfo.file_name)}/approve`, {
+          method: 'POST'
+        });
+        if (!approveResponse.ok) {
+          const payload = await approveResponse.json();
+          throw new Error(payload?.detail || 'Failed to approve file');
+        }
+        clearCurrentResult('File approved. It will be restored to your normal Downloads location and the sandbox session will now close.');
+        return;
+      }
+
       const response = await fetch(`${API_BASE_URL}/api/scan/files/${encodeURIComponent(fileInfo.file_name)}`);
       if (!response.ok) {
         const payload = await response.json();
@@ -292,18 +308,6 @@ export default function ResultPage({ overallResult }) {
         anchor.click();
         anchor.remove();
         URL.revokeObjectURL(url);
-      }
-
-      if (isActiveSandboxReview) {
-        const approveResponse = await fetch(`${API_BASE_URL}/api/scan/files/${encodeURIComponent(fileInfo.file_name)}/approve`, {
-          method: 'POST'
-        });
-        if (!approveResponse.ok) {
-          const payload = await approveResponse.json();
-          throw new Error(payload?.detail || 'Failed to approve file');
-        }
-        clearCurrentResult('File saved, removed from the sandbox, and the sandbox session will now close.');
-        return;
       }
 
       const deleteResponse = await fetch(`${API_BASE_URL}/api/scan/files/${encodeURIComponent(fileInfo.file_name)}`, { method: 'DELETE' });
@@ -414,7 +418,7 @@ export default function ResultPage({ overallResult }) {
       </div>
       {fileInfo?.file_name && <p className="scan-file">Sandbox file: {fileInfo.file_name}</p>}
       {isActiveSandboxReview && (
-        <p className="scan-message">Save will store the file in a folder you choose, remove it from the sandbox, and then close the sandbox. Delete will reject it and close the sandbox.</p>
+        <p className="scan-message">Save will approve the file, restore it to your normal Downloads location, and then close the sandbox. Delete will reject it and close the sandbox.</p>
       )}
       {message && <p className="scan-message">{message}</p>}
     </section>
