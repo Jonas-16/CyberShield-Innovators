@@ -62,3 +62,13 @@ sandbox/*.tmp
 build/
 dist/
 *.egg-info/
+
+
+# ML models
+*.bin
+*.pt
+*.pth
+*.npz
+
+# Node
+**/node_modules/

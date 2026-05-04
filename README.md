@@ -1,68 +1,74 @@
 # CyberShield Innovators
 
-CyberShield Innovators is a malware and steganography scanning system with three connected parts:
+CyberShield Innovators is a malware and steganography scanning system built around a two-laptop demo flow:
 
-- `Backend/`: FastAPI API for uploads, scanner routing, result lookup, and scan history
-- `Frontend/`: React + Vite UI with Dashboard, Scan, Result, and Logs pages
-- `sandbox/`: Windows Sandbox monitor that intercepts supported downloads from your configured download watch folder
+- `user/Frontend/`: React + Vite client UI used on Laptop 1
+- `cloud/Backend/`: FastAPI API and scan worker used on Laptop 2
+- `cloud/sandbox/`: optional Windows Sandbox monitor for local Windows Sandbox review sessions
 
 ## What It Does
 
-- Scans uploaded and downloaded image files with the steganography scanner
-- Scans uploaded and downloaded `.exe` files with the zero-day / malware scanner
-- Ignores unsupported file types
-- Sends intercepted downloads into a Windows Sandbox review session
-- Records scan events in `Backend/app/reports/scan_events.jsonl`
+- Uploads a file from Laptop 1 to Laptop 2
+- Scans image files with the steganography scanner
+- Scans `.exe` files with the zero-day / malware scanner
+- Tracks each remote scan as a scan job with a `scan_id`
+- Records scan events in `cloud/Backend/app/reports/scan_events.jsonl`
 
 ## Supported File Routing
 
 - Images: `.jpg`, `.jpeg`, `.png`, `.bmp`, `.tif`, `.tiff`, `.webp`
-  - Routed to `Backend/app/stg_scanner.py`
+  - Routed to `cloud/Backend/app/stg_scanner.py`
 - Executables: `.exe`
-  - Routed to `Backend/app/zd_scanner.py`
+  - Routed to `cloud/Backend/app/zd_scanner.py`
 - Everything else
   - Ignored
 
 The stable top-level router used by the app is:
 
 ```text
-Backend/app/scanner.py
+cloud/Backend/app/scanner.py
 ```
 
 ## Main Paths
 
 - Project root: `path/to/your/CyberShield-Innovators`
-- Manual uploads: `path/to/your/manual-upload-directory`
-- Download watch folder: `path/to/your/download-watch-directory`
-- Sandbox session root: `path/to/your/sandbox-session-root/sessions`
-- Sandbox logs: `path/to/your/sandbox-log-file`
-- Scan event log: `Backend/app/reports/scan_events.jsonl`
-## Run The Full Stack
+- User app: `path/to/your/CyberShield-Innovators/user/Frontend`
+- Cloud backend: `path/to/your/CyberShield-Innovators/cloud/Backend`
+- Cloud sandbox tools: `path/to/your/CyberShield-Innovators/cloud/sandbox`
+- Scan event log: `cloud/Backend/app/reports/scan_events.jsonl`
+## Two-Laptop Demo Setup
 
-Start everything from the `sandbox` folder:
-
-```powershell
-cd path/to/your/CyberShield-Innovators/sandbox
-powershell -ExecutionPolicy Bypass -File .\scripts\Start-BackendAndSandbox.ps1
-```
-
-This launches:
-
-- the FastAPI backend on `http://127.0.0.1:8000`
-- the sandbox monitor
-- the Vite frontend dev server
-
-Stop everything:
+### Laptop 2: backend + scanning worker
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\Stop-BackendAndSandbox.ps1
+cd cloud/Backend
+pip install -r requirements.txt
+uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-Check stack health:
+Find Laptop 2's LAN IP address and use that in the frontend config on Laptop 1.
+
+### Laptop 1: frontend client
+
+Create `user/Frontend/.env`:
+
+```env
+VITE_BACKEND_URL=http://<LAPTOP_2_IP>:8000
+```
+
+Then run:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\Check-StackHealth.ps1
+cd user/Frontend
+npm install
+npm run dev -- --host 0.0.0.0 --port 5174
 ```
+
+The client on Laptop 1 uploads files to Laptop 2, polls job status, and displays the final report.
+
+## Optional Windows Sandbox Flow
+
+If you still want the original local Windows Sandbox monitor flow for experiments, you can start it from the `cloud/sandbox/` folder. It is no longer required for the main two-laptop demo architecture.
 
 ## Core API Endpoints
 
@@ -70,9 +76,12 @@ powershell -ExecutionPolicy Bypass -File .\scripts\Check-StackHealth.ps1
 - `GET /api/scan/ml-status`
 - `GET /api/scan/config`
 - `POST /api/scan/upload`
+- `GET /api/scan/jobs/{scan_id}`
+- `GET /api/scan/jobs/{scan_id}/report`
 - `GET /api/scan/results/{file_name}`
 - `GET /api/scan/logs`
 - `GET /api/scan/latest`
+- `DELETE /api/scan/jobs/{scan_id}`
 - `GET /api/scan/files/{file_name}`
 - `POST /api/scan/files/{file_name}/approve`
 - `POST /api/scan/files/{file_name}/reject`
@@ -91,22 +100,23 @@ powershell -ExecutionPolicy Bypass -File .\scripts\Check-StackHealth.ps1
 
 ## Current Behavior Notes
 
-- Manual uploads are scanned in the background and exposed through `/api/scan/results/{file_name}`
-- `/api/scan/latest` returns active manual uploads while they are still processing
+- `POST /api/scan/upload` creates a remote scan job and returns a `scan_id`
+- `GET /api/scan/jobs/{scan_id}` returns queued, processing, completed, or failed status
+- `GET /api/scan/jobs/{scan_id}/report` returns a client-friendly report payload
+- `/api/scan/latest` returns the most recent scan job in the current backend session
 - Image results are normalized so `Stego` predictions map to `Suspicious`
-- The `.exe` scanner caches its model stack after startup to reduce repeated scan setup time
-- The backend pre-warms ML stacks on startup
-- Sandbox review sessions now try to exit from inside the guest before the host forces shutdown
+- The `.exe` scanner caches its model stack after startup to reduce repeated initialization overhead
+- The backend can still support Windows Sandbox review sessions when the optional monitor is used
 
 ## Scanner Files
 
-- Stable router: `Backend/app/scanner.py`
-- Image scanner export: `Backend/app/stg_scanner.py`
-- Executable scanner export: `Backend/app/zd_scanner.py`
-- Refactor package work-in-progress: `Backend/app/scanners/`
+- Stable router: `cloud/Backend/app/scanner.py`
+- Image scanner export: `cloud/Backend/app/stg_scanner.py`
+- Executable scanner export: `cloud/Backend/app/zd_scanner.py`
+- Refactor package work-in-progress: `cloud/Backend/app/scanners/`
 
 ## Development Notes
 
-- The scanner package under `Backend/app/scanners/` exists for cleanup and maintainability work
-- The running app should continue to route through `Backend/app/scanner.py`
+- The scanner package under `cloud/Backend/app/scanners/` exists for cleanup and maintainability work
+- The running app should continue to route through `cloud/Backend/app/scanner.py`
 - If the frontend looks stale after backend/frontend restarts, refresh the browser once
