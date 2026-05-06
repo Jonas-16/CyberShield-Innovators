@@ -62,3 +62,13 @@ sandbox/*.tmp
 build/
 dist/
 *.egg-info/
+
+# ML model files
+*.bin
+*.pt
+*.pth
+*.npz
+
+# Backend model folders
+backend/app/models/
+Backend/app/models/
