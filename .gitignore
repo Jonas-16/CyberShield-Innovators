@@ -35,6 +35,8 @@ ENV/
 Backend/app/reports/*.jsonl
 Backend/app/reports/*.log
 Backend/*.log
+backend/tmp/
+Backend/tmp/
 
 # Frontend / Node
 Frontend/node_modules/

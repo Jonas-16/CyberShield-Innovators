@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 
 const API_BASE_URL = import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:8000';
 const REFRESH_INTERVAL_MS = 5000;
+const FOLLOW_UP_ACTIONS = new Set(['approved_via_result_page', 'rejected_via_result_page', 'deleted']);
 
 function statusClass(status) {
   if (status === 'Malicious') return 'tag bad';
@@ -14,6 +15,58 @@ function formatDate(ts) {
   const date = new Date(ts);
   if (Number.isNaN(date.getTime())) return ts;
   return date.toLocaleString();
+}
+
+function resultText(entry) {
+  const suffix = String(entry?.file_name || entry?.path || '').toLowerCase().split('.').pop();
+  const isImage = ['jpg', 'jpeg', 'jfif', 'png', 'bmp', 'gif', 'tif', 'tiff', 'webp'].includes(suffix);
+  const prediction = String(entry?.predicted_label || '').toLowerCase();
+  const decision = String(entry?.decision || '').toUpperCase();
+  const engine = String(entry?.engine || '').toLowerCase();
+  const warning = String(entry?.scanner_warning || '');
+  const risk = typeof entry?.fused_risk === 'number' ? entry.fused_risk : null;
+  const stegoThreshold = typeof entry?.stego_threshold === 'number' ? entry.stego_threshold : 0.7;
+  const reasons = Array.isArray(entry?.reasons) ? entry.reasons.map((reason) => String(reason).toLowerCase()) : [];
+
+  if (prediction === 'stego') return 'Suspicious';
+  if (risk !== null && risk >= stegoThreshold) return 'Suspicious';
+  if (isImage && engine && engine !== 'stg-ml') return 'Suspicious';
+  if (decision === 'BLOCKED') return 'Malicious';
+  if (decision === 'STEGO') return 'Suspicious';
+  if (warning || (engine === 'heuristic' && reasons.some((reason) => reason.includes('could not inspect')))) {
+    return 'Suspicious';
+  }
+  return entry?.overall_result || 'Safe';
+}
+
+function scanKey(entry) {
+  return `${entry?.file_name || ''}:${entry?.path || ''}`;
+}
+
+function dedupeScans(items) {
+  const rows = [];
+  const seen = new Set();
+
+  items.forEach((entry) => {
+    if (FOLLOW_UP_ACTIONS.has(entry?.post_action)) return;
+    const key = scanKey(entry);
+    if (seen.has(key)) return;
+    seen.add(key);
+    rows.push(entry);
+  });
+
+  return rows;
+}
+
+function safetyScore(entry, status) {
+  const risk = typeof entry?.fused_risk === 'number' ? entry.fused_risk : null;
+  if (risk === null) return '-';
+
+  const rawSafety = 1 - risk;
+  let score = Math.max(0, Math.min(100, Math.round(rawSafety * 100)));
+  if (status === 'Suspicious') score = Math.min(score, 69);
+  if (status === 'Malicious') score = Math.min(score, 30);
+  return `${score} / 100`;
 }
 
 export default function LogsPage() {
@@ -33,7 +86,7 @@ export default function LogsPage() {
 
         const payload = await response.json();
         if (!active) return;
-        setItems(Array.isArray(payload.items) ? payload.items : []);
+        setItems(dedupeScans(Array.isArray(payload.items) ? payload.items : []));
         setMessage('');
       } catch (error) {
         if (!active) return;
@@ -62,7 +115,7 @@ export default function LogsPage() {
             <tr>
               <th>File Name</th>
               <th>Status</th>
-              <th>Risk</th>
+              <th>Safety Score</th>
               <th>Engine</th>
               <th>Date</th>
             </tr>
@@ -74,13 +127,12 @@ export default function LogsPage() {
               </tr>
             ) : (
               items.map((entry, idx) => {
-                const status = entry.overall_result || 'Suspicious';
-                const risk = typeof entry.fused_risk === 'number' ? `${(entry.fused_risk * 100).toFixed(2)}%` : '-';
+                const status = resultText(entry);
                 return (
                   <tr key={`${entry.ts || 'na'}-${entry.file_name || 'file'}-${idx}`}>
                     <td>{entry.file_name || '-'}</td>
                     <td><span className={statusClass(status)}>{status}</span></td>
-                    <td>{risk}</td>
+                    <td>{safetyScore(entry, status)}</td>
                     <td>{entry.engine || '-'}</td>
                     <td>{formatDate(entry.ts)}</td>
                   </tr>

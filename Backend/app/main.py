@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -10,12 +11,15 @@ from uuid import uuid4
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
-from app.scanner import SCAN_LOG_FILE, ml_stack_status, scan_file
+from app.scanner import SCAN_LOG_FILE, ml_stack_status, scan_file, write_scan_event
 
 STAGING_DIR = Path(os.environ.get("SANDBOX_STAGING_DIR", r"D:\\Download"))
 MAX_FILE_SIZE_BYTES = 1024 * 1024 * 1024  # 1 GB
 SCAN_RESULTS: dict[str, dict[str, Any]] = {}
 APP_STARTED_AT = datetime.now(timezone.utc)
+SESSION_APPROVE_MARKER = ".approved"
+SESSION_REJECT_MARKER = ".rejected"
+TERMINAL_POST_ACTIONS = {"approved_via_result_page", "rejected_via_result_page", "deleted"}
 
 app = FastAPI(title="Sandbox Upload API", version="1.0.0")
 
@@ -50,12 +54,40 @@ def staging_path_for(file_name: str) -> Path:
     return STAGING_DIR / safe_name
 
 
-def decision_to_result(decision: str) -> str:
+def overall_result_for(payload: dict[str, Any] | None) -> str:
+    data = payload or {}
+    suffix = Path(str(data.get("file_name") or data.get("path") or "")).suffix.lower()
+    explicit = str(data.get("overall_result", "") or "")
+    predicted_label = str(data.get("predicted_label", "") or "").strip().lower()
+    decision = str(data.get("decision", "") or "").upper()
+    engine = str(data.get("engine", "") or "").strip().lower()
+    scanner_warning = str(data.get("scanner_warning", "") or "")
+    fused_risk = data.get("fused_risk")
+    stego_threshold = data.get("stego_threshold")
+    stego_threshold = stego_threshold if isinstance(stego_threshold, (int, float)) else 0.70
+    reasons = [str(reason).lower() for reason in data.get("reasons", []) if reason]
+
     if decision == "BLOCKED":
         return "Malicious"
-    if decision == "UNCERTAIN":
+    if isinstance(fused_risk, (int, float)) and fused_risk >= stego_threshold:
         return "Suspicious"
+    if predicted_label == "stego":
+        return "Suspicious"
+    if decision in {"STEGO", "PENDING", "IGNORED"}:
+        return "Suspicious"
+    if predicted_label == "cover":
+        return "Safe"
+    if suffix in {".jpg", ".jpeg", ".jfif", ".png", ".bmp", ".gif", ".tif", ".tiff", ".webp"} and engine != "stg-ml":
+        return "Suspicious"
+    if scanner_warning or (engine == "heuristic" and any("could not inspect" in reason for reason in reasons)):
+        return "Suspicious"
+    if explicit in {"Safe", "Suspicious", "Malicious"}:
+        return explicit
     return "Safe"
+
+
+def decision_to_result(decision: str) -> str:
+    return overall_result_for({"decision": decision})
 
 
 def parse_event_ts(value: Any) -> datetime | None:
@@ -79,7 +111,7 @@ def process_staged_file(target_path: Path) -> dict[str, Any]:
             "scanner_warning": str(exc),
         }
 
-    overall_result = decision_to_result(scan_result.get("decision", "UNCERTAIN"))
+    overall_result = overall_result_for(scan_result)
     payload = {
         "status": "queued",
         "file_name": target_path.name,
@@ -106,20 +138,55 @@ def read_scan_logs(limit: int) -> list[dict[str, Any]]:
                 event = dict(json.loads(line))
             except Exception:
                 continue
-            event["overall_result"] = decision_to_result(str(event.get("decision", "UNCERTAIN")))
+            event["overall_result"] = overall_result_for(event)
             events.append(event)
 
     events.sort(key=lambda item: str(item.get("ts", "")), reverse=True)
     return events[:limit]
 
 
+def event_scan_key(event: dict[str, Any]) -> str:
+    file_name = Path(str(event.get("file_name") or event.get("path") or "")).name
+    path = str(event.get("path") or "").lower()
+    return f"{file_name.lower()}|{path}"
+
+
+def result_payload_from_log(event: dict[str, Any]) -> dict[str, Any]:
+    safe_name = Path(str(event.get("file_name", ""))).name
+    return {
+        "status": "completed",
+        "file_name": safe_name,
+        "staging_path": str(STAGING_DIR / safe_name),
+        "size_bytes": 0,
+        "scan_result": event,
+        "overall_result": overall_result_for(event),
+        "source": event.get("source") or "download-monitor",
+        "ts": str(event.get("ts") or datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")),
+    }
+
+
+def get_latest_active_result() -> dict[str, Any] | None:
+    if not SCAN_RESULTS:
+        return None
+    items = [dict(item) for item in SCAN_RESULTS.values()]
+    items.sort(key=lambda item: str(item.get("ts", "")), reverse=True)
+    return items[0] if items else None
+
+
 def get_latest_log_event(current_session_only: bool = False) -> dict[str, Any] | None:
     items = read_scan_logs(limit=500)
     if current_session_only:
         items = [item for item in items if (parse_event_ts(item.get("ts")) or datetime.min.replace(tzinfo=timezone.utc)) >= APP_STARTED_AT]
-    if not items:
-        return None
-    return items[0]
+    terminal_keys: set[str] = set()
+    for item in items:
+        key = event_scan_key(item)
+        if key in terminal_keys:
+            continue
+        if str(item.get("post_action", "")) in TERMINAL_POST_ACTIONS:
+            terminal_keys.add(key)
+            continue
+        return item
+    return None
 
 
 def find_logged_event(file_name: str) -> dict[str, Any] | None:
@@ -141,7 +208,7 @@ def find_logged_event(file_name: str) -> dict[str, Any] | None:
                 continue
             latest_match = event
     if latest_match:
-        latest_match["overall_result"] = decision_to_result(str(latest_match.get("decision", "UNCERTAIN")))
+        latest_match["overall_result"] = overall_result_for(latest_match)
     return latest_match
 
 
@@ -181,6 +248,38 @@ def resolve_managed_file(file_name: str) -> Path:
             return candidate
 
     raise HTTPException(status_code=404, detail="File not found in sandbox")
+
+
+def resolve_session_dir(file_path: Path | None) -> Path | None:
+    if file_path is None:
+        return None
+    normalized = file_path.resolve()
+    parent = normalized.parent
+    if parent.name in {"in", "out"} and parent.parent.exists():
+        session_dir = parent.parent
+        if (session_dir / "sandbox.wsb").exists():
+            return session_dir
+    return None
+
+
+def resolve_logged_session_dir(file_name: str) -> Path | None:
+    logged_event = find_logged_event(file_name)
+    logged_path = logged_event.get("path") if logged_event else None
+    if not logged_path:
+        return None
+    return resolve_session_dir(Path(str(logged_path)))
+
+
+def log_follow_up_event(file_name: str, action: str, message: str) -> None:
+    latest = find_logged_event(file_name)
+    if not latest:
+        return
+
+    payload = dict(latest)
+    payload["post_action"] = action
+    payload["message"] = message
+    payload["ts"] = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    write_scan_event(payload)
 
 
 @app.on_event("startup")
@@ -242,8 +341,15 @@ async def upload_to_sandbox(file: UploadFile = File(...)) -> dict[str, Any]:
     finally:
         await file.close()
 
-    payload = process_staged_file(target_path)
-    payload["size_bytes"] = total
+    payload = {
+        "status": "queued",
+        "file_name": target_path.name,
+        "staging_path": str(target_path),
+        "size_bytes": total,
+        "source": "upload-to-sandbox",
+        "message": "Upload completed. The sandbox monitor will pick up this file from the watch folder.",
+        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+    }
     SCAN_RESULTS[target_path.name] = payload
     return payload
 
@@ -252,9 +358,18 @@ async def upload_to_sandbox(file: UploadFile = File(...)) -> dict[str, Any]:
 def get_scan_result(file_name: str) -> dict[str, Any]:
     safe_name = Path(file_name).name
     record = SCAN_RESULTS.get(safe_name)
-    if not record:
-        raise HTTPException(status_code=404, detail="No active scan result found for this file")
-    return record
+    logged_event = find_logged_event(safe_name)
+
+    if logged_event and str(logged_event.get("post_action", "")) not in TERMINAL_POST_ACTIONS:
+        logged_ts = parse_event_ts(logged_event.get("ts"))
+        record_ts = parse_event_ts(record.get("ts")) if record else None
+        if not record or str(record.get("status") or "") in {"queued", "processing"} or not record_ts or (logged_ts and logged_ts >= record_ts):
+            return result_payload_from_log(logged_event)
+
+    if record:
+        return record
+
+    raise HTTPException(status_code=404, detail="No active scan result found for this file")
 
 
 @app.get("/api/scan/logs")
@@ -265,10 +380,20 @@ def get_scan_logs(limit: int = Query(default=50, ge=1, le=500)) -> dict[str, Any
 
 @app.get("/api/scan/latest")
 def get_latest_scan_result() -> dict[str, Any]:
-    latest = get_latest_log_event(current_session_only=True)
-    if not latest:
+    latest_log = get_latest_log_event(current_session_only=True)
+    latest_active = get_latest_active_result()
+
+    candidates: list[dict[str, Any]] = []
+    if latest_log:
+        candidates.append(result_payload_from_log(latest_log))
+    if latest_active:
+        candidates.append(latest_active)
+
+    if not candidates:
         raise HTTPException(status_code=404, detail="No scan results available in this session")
-    return latest
+
+    candidates.sort(key=lambda item: str(item.get("ts", "")), reverse=True)
+    return candidates[0]
 
 
 @app.get("/api/scan/files/{file_name}")
@@ -277,14 +402,78 @@ def download_file(file_name: str) -> FileResponse:
     return FileResponse(path=file_path, filename=file_path.name, media_type="application/octet-stream")
 
 
-@app.delete("/api/scan/files/{file_name}")
-def delete_file(file_name: str) -> dict[str, str]:
-    file_path = resolve_managed_file(file_name)
+@app.post("/api/scan/files/{file_name}/approve")
+def approve_file(file_name: str, restore_to_downloads: bool = Query(default=True)) -> dict[str, str]:
+    safe_name = Path(file_name).name
+    file_path = resolve_managed_file(safe_name)
+    session_dir = resolve_session_dir(file_path)
+    if not session_dir:
+        raise HTTPException(status_code=400, detail="This file is not in an active sandbox session")
 
     try:
+        if restore_to_downloads:
+            out_dir = session_dir / "out"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            approved_path = out_dir / safe_name
+            if file_path.resolve() != approved_path.resolve():
+                if approved_path.exists():
+                    approved_path.unlink()
+                shutil.move(str(file_path), str(approved_path))
+        elif file_path.exists():
+            file_path.unlink()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Approve failed: {exc}")
+
+    (session_dir / SESSION_APPROVE_MARKER).write_text("approved\n", encoding="utf-8")
+    message = (
+        "File was approved and queued to be restored to Downloads."
+        if restore_to_downloads
+        else "File was saved locally, removed from sandbox, and approved."
+    )
+    log_follow_up_event(safe_name, "approved_via_result_page", message)
+    SCAN_RESULTS.pop(safe_name, None)
+    return {"status": "approved", "file_name": safe_name}
+
+
+@app.post("/api/scan/files/{file_name}/reject")
+def reject_file(file_name: str) -> dict[str, str]:
+    safe_name = Path(file_name).name
+    file_path: Path | None = None
+    try:
+        file_path = resolve_managed_file(safe_name)
+    except HTTPException as exc:
+        if exc.status_code != 404:
+            raise
+
+    session_dir = resolve_session_dir(file_path) or resolve_logged_session_dir(safe_name)
+    if not session_dir:
+        raise HTTPException(status_code=400, detail="This file is not in an active sandbox session")
+
+    try:
+        (session_dir / SESSION_REJECT_MARKER).write_text("rejected\n", encoding="utf-8")
+        if file_path and file_path.exists():
+            file_path.unlink()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Reject failed: {exc}")
+
+    log_follow_up_event(safe_name, "rejected_via_result_page", "File was rejected from the Result page and removed from the sandbox.")
+    SCAN_RESULTS.pop(safe_name, None)
+    return {"status": "rejected", "file_name": safe_name}
+
+
+@app.delete("/api/scan/files/{file_name}")
+def delete_file(file_name: str) -> dict[str, str]:
+    safe_name = Path(file_name).name
+    file_path = resolve_managed_file(safe_name)
+    session_dir = resolve_session_dir(file_path) or resolve_logged_session_dir(safe_name)
+
+    try:
+        if session_dir:
+            (session_dir / SESSION_REJECT_MARKER).write_text("rejected\n", encoding="utf-8")
         file_path.unlink()
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Delete failed: {exc}")
 
     SCAN_RESULTS.pop(file_path.name, None)
+    log_follow_up_event(safe_name, "deleted", "File was deleted from the Result page and the sandbox session was closed.")
     return {"status": "deleted", "file_name": file_path.name}

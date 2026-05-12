@@ -32,8 +32,11 @@ SANDBOX_GUEST_IN_DIR = SANDBOX_GUEST_MOUNT_DIR + r"\in"
 SANDBOX_GUEST_OUT_DIR = SANDBOX_GUEST_MOUNT_DIR + r"\out"
 SANDBOX_STARTUP_GRACE_SECONDS = 5
 SANDBOX_RELEASE_WAIT_SECONDS = 1800
-SANDBOX_SHUTDOWN_TIMEOUT_SECONDS = 30
+SANDBOX_SHUTDOWN_TIMEOUT_SECONDS = 8
+SANDBOX_GUEST_EXIT_GRACE_SECONDS = 3
 SESSION_CLEANUP_RETRIES = 5
+SESSION_APPROVE_MARKER = ".approved"
+SESSION_REJECT_MARKER = ".rejected"
 
 POLL_INTERVAL_SECONDS = 2
 STABLE_CHECK_INTERVAL_SECONDS = 1.0
@@ -211,6 +214,9 @@ class SandboxDownloadMonitor(object):
         host_out_file = os.path.join(host_out_dir, safe_file_name)
         wsb_path = os.path.join(session_dir, "sandbox.wsb")
         init_cmd_path = os.path.join(session_dir, "sandbox_init.cmd")
+        guest_watch_path = os.path.join(session_dir, "sandbox_watch.ps1")
+        approve_marker = os.path.join(session_dir, SESSION_APPROVE_MARKER)
+        reject_marker = os.path.join(session_dir, SESSION_REJECT_MARKER)
 
         return {
             "id": session_id,
@@ -221,10 +227,32 @@ class SandboxDownloadMonitor(object):
             "host_out_file": host_out_file,
             "wsb_path": wsb_path,
             "init_cmd_path": init_cmd_path,
+            "guest_watch_path": guest_watch_path,
+            "approve_marker": approve_marker,
+            "reject_marker": reject_marker,
             "file_name": safe_file_name,
         }
 
     def _write_session_files(self, session):
+        guest_watch = (
+            "$approve = \"{0}\"\r\n"
+            "$reject = \"{1}\"\r\n"
+            "while ($true) {{\r\n"
+            "  if ((Test-Path $approve) -or (Test-Path $reject)) {{\r\n"
+            "    Start-Sleep -Seconds 2\r\n"
+            "    Stop-Process -Name explorer -ErrorAction SilentlyContinue\r\n"
+            "    shutdown.exe /s /f /t 0\r\n"
+            "    break\r\n"
+            "  }}\r\n"
+            "  Start-Sleep -Milliseconds 500\r\n"
+            "}}\r\n"
+        ).format(
+            SANDBOX_GUEST_MOUNT_DIR + "\\" + SESSION_APPROVE_MARKER,
+            SANDBOX_GUEST_MOUNT_DIR + "\\" + SESSION_REJECT_MARKER,
+        )
+        with open(session["guest_watch_path"], "w", encoding="utf-8") as handle:
+            handle.write(guest_watch)
+
         init_cmd = (
             "@echo off\r\n"
             "title Sandbox Session\r\n"
@@ -233,12 +261,14 @@ class SandboxDownloadMonitor(object):
             "echo Input file path: {1}\\{2}\r\n"
             "echo To approve, move file to: {3}\r\n"
             "echo To reject, delete file from: {1}\r\n"
+            "start \"\" powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"{4}\"\r\n"
             "start \"\" explorer.exe \"{1}\"\r\n"
         ).format(
             SANDBOX_GUEST_OUT_DIR,
             SANDBOX_GUEST_IN_DIR,
             session["file_name"],
             SANDBOX_GUEST_OUT_DIR,
+            SANDBOX_GUEST_MOUNT_DIR + r"\sandbox_watch.ps1",
         )
         with open(session["init_cmd_path"], "w", encoding="utf-8") as handle:
             handle.write(init_cmd)
@@ -303,21 +333,47 @@ class SandboxDownloadMonitor(object):
 
         self._log_action("SANDBOX_STOPPED", session_id)
 
-    def _wait_for_file_removed(self, path, timeout_seconds):
+    def _wait_for_sandbox_exit(self, process, timeout_seconds):
+        if not process:
+            return True
+        try:
+            process.wait(timeout=timeout_seconds)
+            return True
+        except Exception:
+            return process.poll() is not None
+
+    def _wait_for_sandbox_action(self, session, timeout_seconds):
         start_time = time.time()
         while self.running and not self.shutdown_requested:
-            if not os.path.exists(path):
-                return True
+            if os.path.exists(session["approve_marker"]):
+                return "approved"
+            if os.path.exists(session["reject_marker"]):
+                return "rejected"
+            if not os.path.exists(session["host_in_file"]):
+                return "removed"
             if time.time() - start_time > timeout_seconds:
-                return False
+                return "timeout"
             time.sleep(0.5)
-        return not os.path.exists(path)
+        return "removed" if not os.path.exists(session["host_in_file"]) else "timeout"
 
-    def _decision_to_result(self, decision):
+    def _decision_to_result(self, scan_result):
+        fused_risk = scan_result.get("fused_risk")
+        stego_threshold = scan_result.get("stego_threshold")
+        if not isinstance(stego_threshold, (int, float)):
+            stego_threshold = 0.70
+        decision = str(scan_result.get("decision", "")).upper()
         if decision == "BLOCKED":
             return "Malicious"
-        if decision == "UNCERTAIN":
+        if isinstance(fused_risk, (int, float)) and fused_risk >= stego_threshold:
             return "Suspicious"
+
+        predicted_label = str(scan_result.get("predicted_label", "")).strip().lower()
+        if predicted_label == "stego":
+            return "Suspicious"
+        if decision in {"STEGO", "PENDING", "IGNORED"}:
+            return "Suspicious"
+        if predicted_label == "cover":
+            return "Safe"
         return "Safe"
 
     def _log_scan_result(self, scan_result, post_action, message):
@@ -328,8 +384,22 @@ class SandboxDownloadMonitor(object):
         payload["post_action"] = post_action
         payload["message"] = message
         payload["source"] = "download-monitor"
-        payload["overall_result"] = self._decision_to_result(scan_result.get("decision", "UNCERTAIN"))
+        payload["overall_result"] = self._decision_to_result(scan_result)
         write_scan_event(payload)
+
+    def _scanner_failed_result(self, path, warning):
+        return {
+            "path": path,
+            "file_name": os.path.basename(path),
+            "decision": "UNCERTAIN",
+            "static_prob": 0.5,
+            "behavior_risk": None,
+            "fused_risk": 0.5,
+            "engine": "unavailable",
+            "reasons": ["scanner failed before sandbox review"],
+            "scanner_stage": "scan_file",
+            "scanner_warning": warning,
+        }
 
     def _snapshot_known_files(self):
         self.known_file_state = {}
@@ -415,9 +485,9 @@ class SandboxDownloadMonitor(object):
                     scan_result = scan_file(session["host_in_file"], log_event=False)
                 except Exception as exc:
                     print("[WARN] Scanner failed for {0}: {1}".format(file_name, exc))
-                    scan_result = None
+                    scan_result = self._scanner_failed_result(session["host_in_file"], str(exc))
             else:
-                scan_result = None
+                scan_result = self._scanner_failed_result(session["host_in_file"], "Scanner module was not available.")
 
             if scan_result:
                 self._log_scan_result(
@@ -438,11 +508,21 @@ class SandboxDownloadMonitor(object):
                 SANDBOX_GUEST_IN_DIR,
             ))
 
-            removed = self._wait_for_file_removed(session["host_in_file"], SANDBOX_RELEASE_WAIT_SECONDS)
-            if not removed:
+            sandbox_action = self._wait_for_sandbox_action(session, SANDBOX_RELEASE_WAIT_SECONDS)
+            removed = sandbox_action in {"approved", "rejected", "removed"}
+            if sandbox_action == "timeout":
                 print("[WARN] Timed out waiting for file removal in sandbox: {0}".format(file_name))
             else:
                 self._log_action("FILE_REMOVED_FROM_SANDBOX", session["host_in_file"])
+
+            if removed:
+                if sandbox_action == "removed" and not os.path.exists(session["reject_marker"]):
+                    try:
+                        with open(session["reject_marker"], "w", encoding="utf-8") as handle:
+                            handle.write("rejected\n")
+                    except OSError:
+                        pass
+                self._wait_for_sandbox_exit(sandbox_process, SANDBOX_GUEST_EXIT_GRACE_SECONDS)
 
             if os.path.exists(session["host_out_file"]):
                 final_target = self._get_unique_destination(DOWNLOADS_DIR, file_name)
@@ -450,6 +530,8 @@ class SandboxDownloadMonitor(object):
                     self._log_action("USER_ALLOWED", final_target)
                 else:
                     print("[WARN] Failed to move approved file to Downloads: {0}".format(file_name))
+            elif sandbox_action == "approved":
+                self._log_action("USER_ALLOWED", file_name)
             elif removed:
                 self._log_action("USER_REJECTED", file_name)
 

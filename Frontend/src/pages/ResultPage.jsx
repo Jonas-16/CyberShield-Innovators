@@ -3,6 +3,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 const API_BASE_URL = import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:8000';
 const CLEARED_RESULT_KEY = 'clearedResultMarker';
 const LATEST_POLL_INTERVAL_MS = 5000;
+const TERMINAL_POST_ACTIONS = new Set(['approved_via_result_page', 'rejected_via_result_page', 'deleted']);
 
 function resultClass(result) {
   if (result === 'No file selected') return 'overall warn';
@@ -11,24 +12,139 @@ function resultClass(result) {
   return 'overall safe';
 }
 
+function tagTone(tag) {
+  const value = String(tag || '').toLowerCase();
+  const riskMatch = value.match(/risk(?: score)?:\s*(\d+(?:\.\d+)?)%/);
+  if (riskMatch) {
+    const riskPercent = Number(riskMatch[1]);
+    if (riskPercent >= 70) return 'bad';
+    if (riskPercent >= 40) return 'warn';
+    return 'ok';
+  }
+  if (value.includes('malicious')) return 'bad';
+  if (value.includes('suspicious') || value.includes('uncertain') || value.includes('fallback')) return 'warn';
+  return 'ok';
+}
+
 function getErrorMessage(error) {
+  if (error?.name === 'AbortError') {
+    return 'Save cancelled.';
+  }
   if (error instanceof TypeError) {
     return `Cannot reach backend at ${API_BASE_URL}`;
   }
   return error?.message || 'Request failed';
 }
 
+async function saveBlobWithPicker(blob, fileName) {
+  if (window.showSaveFilePicker) {
+    const handle = await window.showSaveFilePicker({ suggestedName: fileName });
+    const writable = await handle.createWritable();
+    await writable.write(blob);
+    await writable.close();
+    return;
+  }
+
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = fileName;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+}
+
 function buildMarker(payload) {
-  return `${payload?.file_name || ''}:${payload?.ts || ''}:${payload?.post_action || ''}`;
+  const base = payload?.scan_result && typeof payload.scan_result === 'object'
+    ? {
+        ...payload.scan_result,
+        file_name: payload?.file_name || payload.scan_result?.file_name,
+        path: payload.scan_result?.path || payload?.staging_path,
+      }
+    : payload;
+
+  return `${base?.file_name || ''}:${base?.ts || ''}:${base?.post_action || ''}:${base?.path || ''}`;
 }
 
 function buildLatestPayload(payload) {
+  if (payload?.scan_result || payload?.status) {
+    return payload;
+  }
+
   return {
     file_name: payload.file_name,
     scan_result: payload,
     overall_result: payload.overall_result,
-    status: payload.post_action || 'logged'
+    status: payload.post_action || 'logged',
+    source: payload.source || 'download-monitor',
+    ts: payload.ts,
   };
+}
+
+function payloadPostAction(payload) {
+  return payload?.post_action || payload?.scan_result?.post_action || '';
+}
+
+function isTerminalPayload(payload) {
+  return TERMINAL_POST_ACTIONS.has(payloadPostAction(payload));
+}
+
+function isDirectBackendUpload(payload) {
+  return payload?.source === 'manual-upload';
+}
+
+function isPendingPayload(payload) {
+  return payload?.status === 'processing' || payload?.status === 'queued';
+}
+
+function getResultText(scan, fallbackResult) {
+  const suffix = String(scan?.file_name || scan?.path || '').toLowerCase().split('.').pop();
+  const isImage = ['jpg', 'jpeg', 'jfif', 'png', 'bmp', 'gif', 'tif', 'tiff', 'webp'].includes(suffix);
+  const prediction = String(scan?.predicted_label || '').toLowerCase();
+  const decision = String(scan?.decision || '').toUpperCase();
+  const engine = String(scan?.engine || '').toLowerCase();
+  const warning = String(scan?.scanner_warning || '');
+  const risk = typeof scan?.fused_risk === 'number' ? scan.fused_risk : null;
+  const stegoThreshold = typeof scan?.stego_threshold === 'number' ? scan.stego_threshold : 0.7;
+  const reasons = Array.isArray(scan?.reasons) ? scan.reasons.map((reason) => String(reason).toLowerCase()) : [];
+
+  if (prediction === 'stego') return 'Suspicious';
+  if (risk !== null && risk >= stegoThreshold) return 'Suspicious';
+  if (isImage && engine && engine !== 'stg-ml') return 'Suspicious';
+  if (decision === 'BLOCKED') return 'Malicious';
+  if (decision === 'STEGO') return 'Suspicious';
+  if (warning || (engine === 'heuristic' && reasons.some((reason) => reason.includes('could not inspect')))) {
+    return 'Suspicious';
+  }
+  return fallbackResult || 'Safe';
+}
+
+function getDecisionLabel(scan, result) {
+  if (!scan) return '-';
+  const decision = String(scan?.decision || '').toUpperCase();
+  if (result === 'Suspicious' && decision === 'ALLOWED') return 'Suspicious';
+  if (decision === 'ALLOWED') return 'Safe';
+  if (decision === 'BLOCKED') return 'Malicious';
+  return decision || '-';
+}
+
+function computeSafetyScore(scan, result) {
+  if (!scan) return null;
+  const risk = typeof scan?.fused_risk === 'number' ? scan.fused_risk : null;
+  if (risk === null) return result === 'Safe' ? 50 : 40;
+
+  const rawSafety = 1 - risk;
+  let score = Math.max(0, Math.min(100, Math.round(rawSafety * 100)));
+  if (result === 'Suspicious') score = Math.min(score, 69);
+  if (result === 'Malicious') score = Math.min(score, 30);
+  return score;
+}
+
+function formatRiskPercent(risk) {
+  if (typeof risk !== 'number') return 'N/A';
+  const riskPercent = Math.max(0, Math.min(100, risk * 100));
+  return `${riskPercent.toFixed(2)}%`;
 }
 
 export default function ResultPage({ overallResult }) {
@@ -43,7 +159,7 @@ export default function ResultPage({ overallResult }) {
       try {
         const parsed = JSON.parse(raw);
         setFileInfo(parsed);
-        setIsManualUpload(true);
+        setIsManualUpload(isDirectBackendUpload(parsed));
         return;
       } catch (_) {
         localStorage.removeItem('latestSandboxFile');
@@ -55,6 +171,7 @@ export default function ResultPage({ overallResult }) {
         const response = await fetch(`${API_BASE_URL}/api/scan/latest`);
         if (!response.ok) return;
         const payload = await response.json();
+        if (isTerminalPayload(payload)) return;
         const clearedMarker = localStorage.getItem(CLEARED_RESULT_KEY);
         const marker = buildMarker(payload);
         if (clearedMarker && clearedMarker === marker) {
@@ -85,6 +202,7 @@ export default function ResultPage({ overallResult }) {
 
         const payload = await response.json();
         if (!active) return;
+        if (isTerminalPayload(payload)) return;
 
         const clearedMarker = localStorage.getItem(CLEARED_RESULT_KEY);
         const marker = buildMarker(payload);
@@ -125,6 +243,10 @@ export default function ResultPage({ overallResult }) {
             const latestResponse = await fetch(`${API_BASE_URL}/api/scan/latest`);
             if (latestResponse.ok) {
               const latestPayload = await latestResponse.json();
+              if (isTerminalPayload(latestPayload)) {
+                setMessage('No file is currently available in sandbox.');
+                return;
+              }
               const clearedMarker = localStorage.getItem(CLEARED_RESULT_KEY);
               const marker = buildMarker(latestPayload);
               if (!clearedMarker || clearedMarker !== marker) {
@@ -142,8 +264,15 @@ export default function ResultPage({ overallResult }) {
         }
         if (!response.ok) return;
         const payload = await response.json();
+        if (isTerminalPayload(payload)) {
+          localStorage.removeItem('latestSandboxFile');
+          setFileInfo(null);
+          setIsManualUpload(false);
+          setMessage('No file is currently available in sandbox.');
+          return;
+        }
         setFileInfo(payload);
-        setIsManualUpload(true);
+        setIsManualUpload(isDirectBackendUpload(payload));
         localStorage.setItem('latestSandboxFile', JSON.stringify(payload));
       } catch (_) {
         // keep cached result when backend is unavailable
@@ -155,15 +284,22 @@ export default function ResultPage({ overallResult }) {
 
   const scan = fileInfo?.scan_result || null;
   const hasFile = Boolean(fileInfo?.file_name);
+  const isProcessing = isPendingPayload(fileInfo);
   const postAction = scan?.post_action || null;
+  const isTerminalResult = isTerminalPayload(fileInfo);
   const risk = typeof scan?.fused_risk === 'number' ? scan.fused_risk : null;
-  const score = !hasFile ? null : (risk === null ? 50 : Math.max(1, Math.min(99, Math.round((1 - risk) * 100))));
-  const resultText = hasFile ? (fileInfo?.overall_result || overallResult) : 'No file selected';
+  const resultText = !hasFile ? 'No file selected' : (isProcessing ? 'Processing' : getResultText(scan, fileInfo?.overall_result || overallResult));
+  const safetyScore = !hasFile || isProcessing ? null : computeSafetyScore(scan, resultText);
   const warningText = scan?.scanner_warning
     ? 'ML engine is unavailable; running heuristic fallback mode.'
     : '';
-  const showSaveButton = hasFile && !isManualUpload && postAction !== 'auto_saved_safe' && postAction !== 'auto_deleted_blocked';
-  const showDeleteButton = hasFile && ((!isManualUpload && postAction !== 'auto_saved_safe' && postAction !== 'auto_deleted_blocked') || (isManualUpload && !postAction && resultText !== 'Safe'));
+  const isActiveSandboxReview = Boolean(
+    hasFile &&
+    !isManualUpload &&
+    postAction === 'manual_review_required'
+  );
+  const showSaveButton = hasFile && !isProcessing && !isTerminalResult && !isManualUpload && postAction !== 'auto_saved_safe' && postAction !== 'auto_deleted_blocked';
+  const showDeleteButton = hasFile && !isProcessing && !isTerminalResult && ((!isManualUpload && postAction !== 'auto_saved_safe' && postAction !== 'auto_deleted_blocked') || (isManualUpload && !postAction && resultText !== 'Safe'));
   const showClearButton = hasFile;
   const canDelete = showDeleteButton;
 
@@ -172,12 +308,12 @@ export default function ResultPage({ overallResult }) {
       return ['Sandbox: Pending', 'Threat Pattern: Pending', 'Hidden Data: Pending', 'Adversarial Check: Pending'];
     }
 
-    const decisionTag = `Sandbox: ${scan.decision || 'UNCERTAIN'}`;
+    const decisionTag = `Sandbox: ${getDecisionLabel(scan, resultText)}`;
     const engineTag = `Engine: ${scan.engine || 'unknown'}`;
-    const riskTag = risk === null ? 'Risk: N/A' : `Risk: ${(risk * 100).toFixed(2)}%`;
+    const riskTag = `Risk Score: ${formatRiskPercent(risk)}`;
     const warnTag = scan.scanner_warning ? 'Model: Fallback mode' : 'Model: Active';
     return [decisionTag, engineTag, riskTag, warnTag];
-  }, [scan, risk]);
+  }, [scan, risk, resultText]);
 
   const saveFile = async () => {
     if (!fileInfo?.file_name) {
@@ -186,7 +322,7 @@ export default function ResultPage({ overallResult }) {
     }
 
     setIsBusy(true);
-    setMessage('Preparing file for save...');
+    setMessage('Choose where to save the file...');
 
     try {
       const response = await fetch(`${API_BASE_URL}/api/scan/files/${encodeURIComponent(fileInfo.file_name)}`);
@@ -196,23 +332,28 @@ export default function ResultPage({ overallResult }) {
       }
 
       const blob = await response.blob();
-      if (window.showSaveFilePicker) {
-        const handle = await window.showSaveFilePicker({ suggestedName: fileInfo.file_name });
-        const writable = await handle.createWritable();
-        await writable.write(blob);
-        await writable.close();
-      } else {
-        const url = URL.createObjectURL(blob);
-        const anchor = document.createElement('a');
-        anchor.href = url;
-        anchor.download = fileInfo.file_name;
-        document.body.appendChild(anchor);
-        anchor.click();
-        anchor.remove();
-        URL.revokeObjectURL(url);
+      await saveBlobWithPicker(blob, fileInfo.file_name);
+
+      if (isActiveSandboxReview) {
+        const approveResponse = await fetch(`${API_BASE_URL}/api/scan/files/${encodeURIComponent(fileInfo.file_name)}/approve?restore_to_downloads=false`, {
+          method: 'POST'
+        });
+        if (!approveResponse.ok) {
+          const payload = await approveResponse.json();
+          throw new Error(payload?.detail || 'Failed to approve file');
+        }
+        localStorage.removeItem('latestSandboxFile');
+        setFileInfo(null);
+        setIsManualUpload(false);
+        setMessage('File saved, approved, and removed from sandbox. The sandbox session will now close.');
+        return;
       }
 
-      await fetch(`${API_BASE_URL}/api/scan/files/${encodeURIComponent(fileInfo.file_name)}`, { method: 'DELETE' });
+      const deleteResponse = await fetch(`${API_BASE_URL}/api/scan/files/${encodeURIComponent(fileInfo.file_name)}`, { method: 'DELETE' });
+      if (!deleteResponse.ok) {
+        const payload = await deleteResponse.json();
+        throw new Error(payload?.detail || 'Failed to remove file after save');
+      }
       localStorage.removeItem('latestSandboxFile');
       setFileInfo(null);
       setIsManualUpload(false);
@@ -234,14 +375,21 @@ export default function ResultPage({ overallResult }) {
     setMessage('Deleting file from sandbox...');
 
     try {
-      const response = await fetch(`${API_BASE_URL}/api/scan/files/${encodeURIComponent(fileInfo.file_name)}`, {
-        method: 'DELETE'
+      const actionPath = isActiveSandboxReview
+        ? `/api/scan/files/${encodeURIComponent(fileInfo.file_name)}/reject`
+        : `/api/scan/files/${encodeURIComponent(fileInfo.file_name)}`;
+      const response = await fetch(`${API_BASE_URL}${actionPath}`, {
+        method: isActiveSandboxReview ? 'POST' : 'DELETE'
       });
       const payload = await response.json();
       if (!response.ok) {
         throw new Error(payload?.detail || 'Delete failed');
       }
 
+      const marker = buildMarker(fileInfo);
+      if (marker !== ':::') {
+        localStorage.setItem(CLEARED_RESULT_KEY, marker);
+      }
       localStorage.removeItem('latestSandboxFile');
       setFileInfo(null);
       setIsManualUpload(false);
@@ -258,8 +406,10 @@ export default function ResultPage({ overallResult }) {
   };
 
   const clearResults = () => {
-    const marker = buildMarker(scan || fileInfo || {});
-    localStorage.setItem(CLEARED_RESULT_KEY, marker);
+    const marker = buildMarker(fileInfo || scan || {});
+    if (marker !== ':::') {
+      localStorage.setItem(CLEARED_RESULT_KEY, marker);
+    }
     localStorage.removeItem('latestSandboxFile');
     setFileInfo(null);
     setIsManualUpload(false);
@@ -269,23 +419,23 @@ export default function ResultPage({ overallResult }) {
   return (
     <section className="page">
       <h2>Result Page</h2>
-      <p className="page-help">This page tells you clearly if your file is safe or not.</p>
+      <p className="page-help">This page shows the file safety score with its risk percentage.</p>
 
       <div className="result-grid">
         <article className="card result-main">
           <h3>Safety Score</h3>
           <p className="score">
-            {score === null ? '--' : score} <span>/100</span>
+            {safetyScore === null ? '--' : Math.round(safetyScore)} <span>/100</span>
           </p>
           <p className={resultClass(resultText)}>Result: {resultText}</p>
-          <p className="muted-text">Higher score means lower risk.</p>
+          <p className="muted-text">Risk: {formatRiskPercent(risk)}</p>
         </article>
 
         <article className="card result-layers">
           <h3>What We Checked</h3>
           <div className="tag-list">
             {tags.map((tag) => (
-              <span key={tag} className="tag ok">{tag}</span>
+              <span key={tag} className={`tag ${tagTone(tag)}`}>{tag}</span>
             ))}
           </div>
           {warningText && <p className="scan-message">{warningText}</p>}
@@ -308,5 +458,3 @@ export default function ResultPage({ overallResult }) {
     </section>
   );
 }
-
-
