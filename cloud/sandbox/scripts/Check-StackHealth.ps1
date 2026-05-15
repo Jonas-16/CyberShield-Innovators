@@ -35,21 +35,16 @@ foreach ($target in $targets) {
 Write-Host ""
 Write-Host "Service checks"
 
-$backendOk = $false
-for ($i = 0; $i -lt 5; $i++) {
-    try {
-        $backendHealth = Invoke-RestMethod -Uri "http://127.0.0.1:8000/api/health" -TimeoutSec 10
-        if ($backendHealth.status -eq "ok") {
-            Write-Host "[OK] Backend API: http://127.0.0.1:8000/api/health"
-            $backendOk = $true
-            break
-        }
+try {
+    $backendHealth = Invoke-RestMethod -Uri "http://127.0.0.1:8000/api/health" -TimeoutSec 5
+    if ($backendHealth.status -eq "ok") {
+        Write-Host "[OK] Backend API: http://127.0.0.1:8000/api/health"
     }
-    catch {
-        Start-Sleep -Seconds 3
+    else {
+        Write-Host "[FAIL] Backend API returned unexpected response"
     }
 }
-if (-not $backendOk) {
+catch {
     Write-Host "[FAIL] Backend API is not responding on http://127.0.0.1:8000/api/health"
 }
 
@@ -95,4 +90,3 @@ if (Test-Path "C:\Sandbox_Logs\sandbox.log") {
 else {
     Write-Host "[FAIL] Sandbox log file not found at C:\Sandbox_Logs\sandbox.log"
 }
-

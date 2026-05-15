@@ -1,7 +1,8 @@
-$projectRoot = Split-Path -Parent $PSScriptRoot
-$backendRoot = Join-Path $projectRoot "..\Backend"
-$frontendRoot = Join-Path $projectRoot "..\Frontend"
-$sandboxRoot = $projectRoot
+$sandboxRoot = Split-Path -Parent $PSScriptRoot
+$cloudRoot = Split-Path -Parent $sandboxRoot
+$repoRoot = Split-Path -Parent $cloudRoot
+$backendRoot = Join-Path $cloudRoot "backend"
+$frontendRoot = Join-Path $repoRoot "user\Frontend"
 $backendActivate = Join-Path $backendRoot ".venv-ml\Scripts\Activate.ps1"
 $healthCheckScript = Join-Path $PSScriptRoot "Check-StackHealth.ps1"
 $stackStatePath = Join-Path $PSScriptRoot "stack-state.json"
@@ -73,9 +74,8 @@ $stackState | ConvertTo-Json | Set-Content -Path $stackStatePath
 
 Write-Host "Backend, sandbox monitor, and frontend launched."
 Write-Host "Waiting for services to come up before running health check..."
-Start-Sleep -Seconds 15
+Start-Sleep -Seconds 8
 Write-Host ""
 Write-Host "Stack health"
 & $healthCheckScript
-
 

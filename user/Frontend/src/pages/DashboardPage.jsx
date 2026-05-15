@@ -1,86 +1,48 @@
 import React, { useEffect, useMemo, useState } from 'react';
 
 const API_BASE_URL = import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:8000';
-const LOG_POLL_INTERVAL_MS = 10000;
-const NON_SCAN_POST_ACTIONS = new Set(['approved_via_result_page', 'rejected_via_result_page', 'deleted']);
+const REFRESH_INTERVAL_MS = 5000;
+const FOLLOW_UP_ACTIONS = new Set(['approved_via_result_page', 'rejected_via_result_page', 'deleted']);
 
-function normalizeLatestPayload(payload) {
-  if (!payload) return null;
-  if (payload?.scan_result || payload?.status) {
-    return payload;
-  }
-  return {
-    file_name: payload.file_name,
-    scan_result: payload,
-    overall_result: payload.overall_result,
-    status: payload.post_action || 'logged',
-    ts: payload.ts,
-  };
-}
-
-function formatTimestamp(value) {
-  if (!value) return '--';
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return '--';
+function formatDate(ts) {
+  if (!ts) return '-';
+  const date = new Date(ts);
+  if (Number.isNaN(date.getTime())) return ts;
   return date.toLocaleString();
 }
 
-function isActiveLatestPayload(payload) {
-  if (!payload) return false;
-  if (payload?.status === 'processing' || payload?.status === 'queued') {
-    return true;
-  }
-
-  const scan = payload?.scan_result || payload;
-  return scan?.source === 'download-monitor' && scan?.post_action === 'manual_review_required';
-}
-
-function getCurrentActivityText(payload) {
-  if (!isActiveLatestPayload(payload)) {
-    return 'No active scan';
-  }
-
-  if (payload?.status === 'processing' || payload?.status === 'queued') {
-    return `${payload.file_name || 'file'} (processing)`;
-  }
-
-  return `${payload?.file_name || 'file'} (awaiting sandbox review)`;
+function scanKey(entry) {
+  return `${entry?.file_name || ''}:${entry?.path || ''}`;
 }
 
 export default function DashboardPage() {
-  const [items, setItems] = useState([]);
-  const [latest, setLatest] = useState(null);
+  const [logs, setLogs] = useState([]);
+  const [message, setMessage] = useState('');
 
   useEffect(() => {
     let active = true;
 
     const loadLogs = async () => {
       try {
-        const [logsResponse, latestResponse] = await Promise.all([
-          fetch(`${API_BASE_URL}/api/scan/logs?limit=500`),
-          fetch(`${API_BASE_URL}/api/scan/latest`)
-        ]);
-
-        if (logsResponse.ok) {
-          const payload = await logsResponse.json();
-          if (active) {
-            setItems(Array.isArray(payload.items) ? payload.items : []);
-          }
+        const response = await fetch(`${API_BASE_URL}/api/scan/logs?limit=500`);
+        if (!response.ok) {
+          const payload = await response.json();
+          throw new Error(payload?.detail || 'Failed to load dashboard stats');
         }
 
-        if (latestResponse.ok) {
-          const payload = await latestResponse.json();
-          if (active) {
-            setLatest(normalizeLatestPayload(payload));
-          }
-        }
-      } catch (_) {
-        // keep current dashboard values if backend is unavailable
+        const payload = await response.json();
+        if (!active) return;
+        setLogs(Array.isArray(payload.items) ? payload.items : []);
+        setMessage('');
+      } catch (error) {
+        if (!active) return;
+        setLogs([]);
+        setMessage(error?.message || `Cannot reach backend at ${API_BASE_URL}`);
       }
     };
 
     loadLogs();
-    const timer = setInterval(loadLogs, LOG_POLL_INTERVAL_MS);
+    const timer = setInterval(loadLogs, REFRESH_INTERVAL_MS);
 
     return () => {
       active = false;
@@ -89,29 +51,41 @@ export default function DashboardPage() {
   }, []);
 
   const stats = useMemo(() => {
-    const scanItems = items.filter((item) => !NON_SCAN_POST_ACTIONS.has(item?.post_action || ''));
-    const filesScanned = scanItems.length;
-    const threatsBlocked = scanItems.filter((item) => item?.decision === 'BLOCKED').length;
-    const lastScan = isActiveLatestPayload(latest) && latest?.status === 'processing'
-      ? `Scanning ${latest?.file_name || 'file'}`
-      : (latest?.ts ? formatTimestamp(latest.ts) : (scanItems.length > 0 ? formatTimestamp(scanItems[0]?.ts) : '--'));
-    const currentActivity = getCurrentActivityText(latest);
-    return { filesScanned, threatsBlocked, lastScan, currentActivity };
-  }, [items, latest]);
+    const uniqueScans = new Map();
+
+    logs.forEach((entry) => {
+      if (!entry?.file_name || FOLLOW_UP_ACTIONS.has(entry.post_action)) return;
+      const key = scanKey(entry);
+      if (!uniqueScans.has(key)) {
+        uniqueScans.set(key, entry);
+      }
+    });
+
+    const scans = Array.from(uniqueScans.values());
+    scans.sort((a, b) => Date.parse(b.ts || '') - Date.parse(a.ts || ''));
+
+    return {
+      lastScan: formatDate(scans[0]?.ts),
+      filesScanned: scans.length,
+      threatsBlocked: scans.filter((entry) => (
+        entry.overall_result === 'Malicious' || String(entry.decision || '').toUpperCase() === 'BLOCKED'
+      )).length,
+    };
+  }, [logs]);
 
   return (
     <section className="page dashboard-page">
       <div className="dashboard-hero card">
         <div>
           <p className="hero-kicker">Cyber Shield Innovators</p>
-          <h2>Automatic protection for every download</h2>
+          <h2>User-to-cloud file scanning</h2>
           <p className="page-help">
-            Laptop 1 sends files to the remote scanning laptop, which analyzes them and sends the report back here.
+            The user laptop runs this UI. Files are uploaded to the backend scanner, which can run on another demo laptop now and a cloud server later.
           </p>
         </div>
         <div className="hero-pill-stack">
-          <span className="hero-pill">Remote Scan: ON</span>
-          <span className="hero-pill">Mode: Two-Laptop Demo</span>
+          <span className="hero-pill">Upload Scan: ON</span>
+          <span className="hero-pill">Mode: Backend API</span>
         </div>
       </div>
 
@@ -128,11 +102,8 @@ export default function DashboardPage() {
           <h4>Threats Blocked</h4>
           <p>{stats.threatsBlocked}</p>
         </article>
-        <article className="card stat-card">
-          <h4>Current Activity</h4>
-          <p>{stats.currentActivity}</p>
-        </article>
       </div>
+      {message && <p className="scan-message">{message}</p>}
 
       <div className="dashboard-columns">
         <article className="card">
@@ -146,12 +117,12 @@ export default function DashboardPage() {
         </article>
 
         <article className="card">
-          <h3>Remote Scan Flow</h3>
+          <h3>Demo Flow</h3>
           <ul className="bullet-list">
-            <li>Choose a file on Laptop 1</li>
-            <li>The app uploads it to Laptop 2</li>
-            <li>Laptop 2 scans it and stores the result</li>
-            <li>Laptop 1 polls and displays the final report</li>
+            <li>User chooses a file in the frontend</li>
+            <li>Frontend uploads it to the backend API</li>
+            <li>Backend stores and scans the file</li>
+            <li>Frontend shows the returned safety result</li>
           </ul>
         </article>
       </div>

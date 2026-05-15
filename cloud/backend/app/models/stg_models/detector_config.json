@@ -1,0 +1,24 @@
+{
+  "strategy": {
+    "kind": "multiclass_clean_class",
+    "model_name": "efficientnet_b4",
+    "clean_class_index": 1
+  },
+  "thresholds": {
+    "clean": 0.9999999983337724,
+    "stego": 0.9999999983337724
+  },
+  "metrics": {
+    "correct_non_uncertain": 22,
+    "coverage": 40,
+    "total": 40,
+    "accuracy": 0.55,
+    "false_positives": 7,
+    "false_negatives": 11,
+    "uncertain": 0
+  },
+  "source": {
+    "clean_dir": "D:\\project\\Cover",
+    "stego_dir": "D:\\project\\JUNIWARD"
+  }
+}

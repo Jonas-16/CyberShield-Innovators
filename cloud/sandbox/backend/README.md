@@ -1,7 +1,10 @@
-# Backend (FastAPI) - Sandbox Upload
+# Legacy Sandbox Upload Backend
 
-This API receives files from your frontend scan page and writes them into `C:\Sandbox_Staging`.
-Your `sandbox_monitor.py` watches that folder, so upload to backend triggers sandbox flow.
+This is an optional legacy helper for the Windows Sandbox prototype under `cloud/sandbox`.
+The main cloud scanner API now lives in `cloud/backend`.
+
+This helper receives files and writes them into `C:\Sandbox_Staging`.
+`cloud/sandbox/sandbox_monitor.py` can watch that folder, so upload to this helper triggers the old sandbox flow.
 
 ## Run
 
@@ -10,6 +13,8 @@ cd backend
 pip install -r requirements.txt
 uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
+
+Run this command from `cloud/sandbox` if you need this legacy helper.
 
 ## Endpoint
 

@@ -96,22 +96,6 @@ body {
   font-size: 1.7rem;
 }
 
-.brand-lockup {
-  display: inline-flex;
-  align-items: center;
-  gap: 12px;
-  min-height: 48px;
-}
-
-.brand-logo {
-  width: 58px;
-  height: 58px;
-  display: block;
-  object-fit: contain;
-  transform: scale(1.38);
-  transform-origin: center;
-}
-
 .header-status {
   position: absolute;
   top: 50%;
@@ -522,24 +506,8 @@ td {
   }
 
   .topbar {
-    justify-content: space-between;
-    flex-wrap: wrap;
-    gap: 10px;
+    justify-content: flex-start;
     padding-right: 12px;
-  }
-
-  .brand-lockup {
-    gap: 10px;
-  }
-
-  .brand-logo {
-    width: 46px;
-    height: 46px;
-    transform: scale(1.3);
-  }
-
-  .topbar h1 {
-    font-size: 1.35rem;
   }
 
   .header-status {

@@ -1,10 +1,15 @@
 import React, { useEffect, useMemo, useState } from 'react';
 
 const API_BASE_URL = import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:8000';
-const LATEST_SCAN_JOB_KEY = 'latestScanJob';
+const LATEST_SCAN_KEY = 'latestCloudScan';
 
 function isPendingResult(payload) {
   return payload?.status === 'processing' || payload?.status === 'queued';
+}
+
+function isCloudUpload(payload) {
+  if (!payload) return false;
+  return payload?.source === 'cloud-upload';
 }
 
 function getStatusMessage(payload) {
@@ -16,7 +21,7 @@ function getStatusMessage(payload) {
     return `Scan failed: ${payload?.file_name || 'file'}`;
   }
   if (isPendingResult(payload)) {
-    return payload?.message || `Queued ${payload?.file_name || 'file'} for sandbox review...`;
+    return payload?.message || `Scanning ${payload?.file_name || 'file'} on the backend...`;
   }
   return `Scan completed: ${payload?.file_name || 'file'}`;
 }
@@ -25,17 +30,43 @@ function formatPercent(value) {
   return typeof value === 'number' ? `${(value * 100).toFixed(2)}%` : '-';
 }
 
+function resultText(scan, fallbackResult) {
+  const risk = typeof scan?.fused_risk === 'number' ? scan.fused_risk : null;
+  const stegoThreshold = typeof scan?.stego_threshold === 'number' ? scan.stego_threshold : 0.7;
+  const prediction = String(scan?.predicted_label || '').toLowerCase();
+  const decision = String(scan?.decision || '').toUpperCase();
+
+  if (decision === 'BLOCKED') return 'Malicious';
+  if (risk !== null && risk >= stegoThreshold) return 'Suspicious';
+  if (prediction === 'stego') return 'Suspicious';
+  if (decision === 'STEGO') return 'Suspicious';
+  if (prediction === 'cover' || decision === 'ALLOWED' || decision === 'COVER') return 'Safe';
+  return fallbackResult || '-';
+}
+
+function formatSafetyScore(scan, status) {
+  const risk = typeof scan?.fused_risk === 'number' ? scan.fused_risk : null;
+  if (risk === null) return '-';
+
+  const rawSafety = 1 - risk;
+  let score = Math.max(0, Math.min(100, Math.round(rawSafety * 100)));
+  if (status === 'Suspicious') score = Math.min(score, 69);
+  if (status === 'Malicious') score = Math.min(score, 30);
+  return `${score} / 100`;
+}
+
 function buildDetailRows(result) {
   const scan = result?.scan_result || null;
   if (!scan) return [];
 
   const reasons = Array.isArray(scan?.reasons) ? scan.reasons.filter(Boolean).join(', ') : '';
+  const status = resultText(scan, result?.overall_result);
   return [
-    { label: 'Overall Result', value: result?.overall_result || '-' },
+    { label: 'Overall Result', value: status },
+    { label: 'Safety Score', value: formatSafetyScore(scan, status) },
     { label: 'Decision', value: scan?.decision || '-' },
     { label: 'Engine', value: scan?.engine || '-' },
     { label: 'Risk Score', value: typeof scan?.fused_risk === 'number' ? formatPercent(scan.fused_risk) : '-' },
-    { label: 'Static Score', value: typeof scan?.static_prob === 'number' ? formatPercent(scan.static_prob) : '-' },
     { label: 'Prediction', value: scan?.predicted_label || '-' },
     { label: 'Confidence', value: formatPercent(scan?.confidence) },
     { label: 'Stego Probability', value: formatPercent(scan?.stego_prob) },
@@ -50,19 +81,21 @@ export default function ScanPage() {
   const [isUploading, setIsUploading] = useState(false);
   const [message, setMessage] = useState('');
   const [result, setResult] = useState(null);
-  const [scanId, setScanId] = useState(null);
 
   useEffect(() => {
-    const raw = localStorage.getItem(LATEST_SCAN_JOB_KEY);
+    const raw = localStorage.getItem(LATEST_SCAN_KEY);
     if (!raw) {
       return;
     }
 
     try {
       const payload = JSON.parse(raw);
+      if (!isCloudUpload(payload)) {
+        return;
+      }
+
       setSelectedFile({ name: payload.file_name });
       setResult(payload);
-      setScanId(payload.scan_id || null);
       setMessage(getStatusMessage(payload));
     } catch (_) {
       // Ignore malformed cached payloads.
@@ -71,7 +104,8 @@ export default function ScanPage() {
 
 
   useEffect(() => {
-    if (!scanId || !isPendingResult(result)) {
+    const fileName = result?.file_name;
+    if (!fileName || !isPendingResult(result) || !isCloudUpload(result)) {
       return;
     }
 
@@ -79,21 +113,25 @@ export default function ScanPage() {
 
     const poll = async () => {
       try {
-        const response = await fetch(`${API_BASE_URL}/api/scan/jobs/${encodeURIComponent(scanId)}`);
+        const response = await fetch(`${API_BASE_URL}/api/scan/latest`);
         if (!response.ok) return;
         const payload = await response.json();
         if (!active) {
           return;
         }
 
-        if (isPendingResult(payload)) {
-          setResult(payload);
-          localStorage.setItem(LATEST_SCAN_JOB_KEY, JSON.stringify(payload));
-          setMessage(payload?.message || `Waiting for remote review of ${payload?.file_name || 'file'}...`);
+        const latestFileName = payload?.file_name || payload?.scan_result?.file_name;
+        if (latestFileName !== fileName) {
+          setMessage(`Waiting for backend scan of ${fileName}...`);
           return;
         }
 
-        localStorage.setItem(LATEST_SCAN_JOB_KEY, JSON.stringify(payload));
+        if (isPendingResult(payload)) {
+          setMessage(payload?.message || `Waiting for backend scan of ${fileName}...`);
+          return;
+        }
+
+        localStorage.setItem(LATEST_SCAN_KEY, JSON.stringify(payload));
         setResult(payload);
         setMessage(getStatusMessage(payload));
       } catch (_) {
@@ -128,7 +166,7 @@ export default function ScanPage() {
 
     setSelectedFile({ name: file.name });
     setResult(null);
-      setMessage('Uploading file into the sandbox queue...');
+    setMessage('Uploading file to the backend scanner...');
     setIsUploading(true);
 
     const formData = new FormData();
@@ -145,9 +183,8 @@ export default function ScanPage() {
         throw new Error(payload?.detail || 'Upload failed');
       }
 
-      localStorage.setItem(LATEST_SCAN_JOB_KEY, JSON.stringify(payload));
+      localStorage.setItem(LATEST_SCAN_KEY, JSON.stringify(payload));
       setResult(payload);
-      setScanId(payload.scan_id || null);
       setMessage(getStatusMessage(payload));
     } catch (error) {
       const isNetworkError = error instanceof TypeError && String(error.message || '').toLowerCase().includes('fetch');
@@ -166,20 +203,26 @@ export default function ScanPage() {
     <section className="page">
       <h2>Scan Page</h2>
       <p className="page-help">
-        This laptop is the client. Uploaded files are sent to the remote scanning laptop for analysis and the result is polled back here.
+        Select a file on this user laptop. The UI uploads it to the backend scanner and shows the result here.
       </p>
 
+      <div className="card scan-config-card">
+        <h3>Backend Connection</h3>
+        <p className="muted-text">
+          Current API: <strong>{API_BASE_URL}</strong>. For the demo laptop setup, point VITE_BACKEND_URL to the backend laptop IP.
+        </p>
+      </div>
+
       <div className="card upload-card">
-        <h3>Remote File Check</h3>
+        <h3>Manual File Check</h3>
         <label htmlFor="scanFileInput" className="upload-dropzone">
-          <span>{isUploading ? 'Queueing...' : 'Click here to choose a file'}</span>
-          <span className="muted">The file is uploaded to Laptop 2, scanned there, and the report is returned here.</span>
+          <span>{isUploading ? 'Uploading...' : 'Click here to choose a file'}</span>
+          <span className="muted">Uploaded files are scanned on the backend machine.</span>
           <input id="scanFileInput" type="file" onChange={handleFileChange} disabled={isUploading} />
         </label>
         {selectedFile && <p className="scan-file">Selected: {selectedFile.name}</p>}
         {message && <p className="scan-message">{message}</p>}
-        {scanId && <p className="scan-meta">Scan ID: {scanId}</p>}
-        {result?.staging_path && <p className="scan-meta">Staging path: {result.staging_path}</p>}
+        {result?.staging_path && <p className="scan-meta">Backend file path: {result.staging_path}</p>}
         {scanDetails.length > 0 && (
           <div className="scan-detail-list">
             {scanDetails.map((detail) => (
@@ -202,5 +245,3 @@ export default function ScanPage() {
     </section>
   );
 }
-
-

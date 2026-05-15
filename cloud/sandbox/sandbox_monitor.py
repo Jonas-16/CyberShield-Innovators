@@ -23,7 +23,7 @@ LOG_DIR = r"C:\Sandbox_Logs"
 LOG_FILE = os.path.join(LOG_DIR, "sandbox.log")
 DOWNLOADS_DIR = os.path.join(os.environ.get("USERPROFILE", r"C:\Users\Public"), "Downloads")
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-BACKEND_ROOT = os.path.join(PROJECT_ROOT, "Backend")
+BACKEND_ROOT = os.path.join(PROJECT_ROOT, "backend")
 
 WINDOWS_SANDBOX_EXE = os.environ.get("WINDOWS_SANDBOX_EXE", r"C:\Windows\System32\WindowsSandbox.exe")
 SANDBOX_SESSION_ROOT = os.path.join(SANDBOX_DIR, "sessions")
@@ -32,9 +32,11 @@ SANDBOX_GUEST_IN_DIR = SANDBOX_GUEST_MOUNT_DIR + r"\in"
 SANDBOX_GUEST_OUT_DIR = SANDBOX_GUEST_MOUNT_DIR + r"\out"
 SANDBOX_STARTUP_GRACE_SECONDS = 5
 SANDBOX_RELEASE_WAIT_SECONDS = 1800
-SANDBOX_SHUTDOWN_TIMEOUT_SECONDS = 30
-SANDBOX_GUEST_EXIT_GRACE_SECONDS = 20
+SANDBOX_SHUTDOWN_TIMEOUT_SECONDS = 8
+SANDBOX_GUEST_EXIT_GRACE_SECONDS = 3
 SESSION_CLEANUP_RETRIES = 5
+SESSION_APPROVE_MARKER = ".approved"
+SESSION_REJECT_MARKER = ".rejected"
 
 POLL_INTERVAL_SECONDS = 2
 STABLE_CHECK_INTERVAL_SECONDS = 1.0
@@ -48,16 +50,13 @@ IGNORED_FILE_NAMES = {
     "desktop.ini",
     "thumbs.db",
 }
-SESSION_APPROVE_MARKER = ".approved"
-SESSION_REJECT_MARKER = ".rejected"
 
 if BACKEND_ROOT not in sys.path:
     sys.path.insert(0, BACKEND_ROOT)
 
 try:
-    from app.scanner import is_supported_file, scan_file, write_scan_event
+    from app.scanner import scan_file, write_scan_event
 except Exception:
-    is_supported_file = None
     scan_file = None
     write_scan_event = None
 
@@ -77,17 +76,6 @@ def is_temporary_download_path(path):
     return False
 
 
-def is_supported_monitored_file(path):
-    if is_temporary_download_path(path):
-        return False
-    if is_supported_file is None:
-        return True
-    try:
-        return bool(is_supported_file(path))
-    except Exception:
-        return False
-
-
 class SandboxDownloadMonitor(object):
     def __init__(self):
         self.running = False
@@ -100,7 +88,6 @@ class SandboxDownloadMonitor(object):
         self.recently_processed = {}
         self.current_sandbox_process = None
         self.known_file_state = {}
-        self.known_ignored_state = {}
         self.tray_icon = None
 
         self._ensure_directories()
@@ -254,7 +241,7 @@ class SandboxDownloadMonitor(object):
             "  if ((Test-Path $approve) -or (Test-Path $reject)) {{\r\n"
             "    Start-Sleep -Seconds 2\r\n"
             "    Stop-Process -Name explorer -ErrorAction SilentlyContinue\r\n"
-            "    shutdown.exe /s /t 0\r\n"
+            "    shutdown.exe /s /f /t 0\r\n"
             "    break\r\n"
             "  }}\r\n"
             "  Start-Sleep -Milliseconds 500\r\n"
@@ -355,7 +342,7 @@ class SandboxDownloadMonitor(object):
         except Exception:
             return process.poll() is not None
 
-    def _wait_for_session_resolution(self, session, timeout_seconds):
+    def _wait_for_sandbox_action(self, session, timeout_seconds):
         start_time = time.time()
         while self.running and not self.shutdown_requested:
             if os.path.exists(session["approve_marker"]):
@@ -367,17 +354,26 @@ class SandboxDownloadMonitor(object):
             if time.time() - start_time > timeout_seconds:
                 return "timeout"
             time.sleep(0.5)
-        if os.path.exists(session["approve_marker"]):
-            return "approved"
-        if os.path.exists(session["reject_marker"]):
-            return "rejected"
         return "removed" if not os.path.exists(session["host_in_file"]) else "timeout"
 
-    def _decision_to_result(self, decision):
+    def _decision_to_result(self, scan_result):
+        fused_risk = scan_result.get("fused_risk")
+        stego_threshold = scan_result.get("stego_threshold")
+        if not isinstance(stego_threshold, (int, float)):
+            stego_threshold = 0.70
+        decision = str(scan_result.get("decision", "")).upper()
         if decision == "BLOCKED":
             return "Malicious"
-        if decision == "UNCERTAIN":
+        if isinstance(fused_risk, (int, float)) and fused_risk >= stego_threshold:
             return "Suspicious"
+
+        predicted_label = str(scan_result.get("predicted_label", "")).strip().lower()
+        if predicted_label == "stego":
+            return "Suspicious"
+        if decision in {"STEGO", "PENDING", "IGNORED"}:
+            return "Suspicious"
+        if predicted_label == "cover":
+            return "Safe"
         return "Safe"
 
     def _log_scan_result(self, scan_result, post_action, message):
@@ -388,8 +384,22 @@ class SandboxDownloadMonitor(object):
         payload["post_action"] = post_action
         payload["message"] = message
         payload["source"] = "download-monitor"
-        payload["overall_result"] = self._decision_to_result(scan_result.get("decision", "UNCERTAIN"))
+        payload["overall_result"] = self._decision_to_result(scan_result)
         write_scan_event(payload)
+
+    def _scanner_failed_result(self, path, warning):
+        return {
+            "path": path,
+            "file_name": os.path.basename(path),
+            "decision": "UNCERTAIN",
+            "static_prob": 0.5,
+            "behavior_risk": None,
+            "fused_risk": 0.5,
+            "engine": "unavailable",
+            "reasons": ["scanner failed before sandbox review"],
+            "scanner_stage": "scan_file",
+            "scanner_warning": warning,
+        }
 
     def _snapshot_known_files(self):
         self.known_file_state = {}
@@ -397,7 +407,7 @@ class SandboxDownloadMonitor(object):
             for entry in os.scandir(STAGING_DIR):
                 if not entry.is_file():
                     continue
-                if not is_supported_monitored_file(entry.path):
+                if is_temporary_download_path(entry.path):
                     continue
                 try:
                     stat = entry.stat()
@@ -410,22 +420,16 @@ class SandboxDownloadMonitor(object):
     def _poll_staging_dir(self):
         try:
             current_state = {}
-            current_ignored_state = {}
             for entry in os.scandir(STAGING_DIR):
                 if not entry.is_file():
+                    continue
+                if is_temporary_download_path(entry.path):
                     continue
                 try:
                     stat = entry.stat()
                 except OSError:
                     continue
                 state = (stat.st_size, stat.st_mtime)
-                if not is_supported_monitored_file(entry.path):
-                    if not is_temporary_download_path(entry.path):
-                        current_ignored_state[entry.path] = state
-                        previous_ignored = self.known_ignored_state.get(entry.path)
-                        if previous_ignored is None or previous_ignored != state:
-                            print("[INFO] Ignoring unsupported download: {0}".format(entry.path))
-                    continue
                 current_state[entry.path] = state
                 previous_state = self.known_file_state.get(entry.path)
                 if previous_state is None or previous_state != state:
@@ -433,7 +437,6 @@ class SandboxDownloadMonitor(object):
                         if entry.path not in self.active_files and not self._is_in_cooldown(entry.path):
                             self.file_queue.put(entry.path)
             self.known_file_state = current_state
-            self.known_ignored_state = current_ignored_state
             self._prune_cooldowns()
         except OSError as exc:
             print("[WARN] Could not poll staging folder: {0}".format(exc))
@@ -457,7 +460,7 @@ class SandboxDownloadMonitor(object):
         sandbox_process = None
 
         try:
-            if not is_supported_monitored_file(absolute_path):
+            if is_temporary_download_path(absolute_path):
                 return
             if not os.path.exists(absolute_path):
                 return
@@ -482,9 +485,9 @@ class SandboxDownloadMonitor(object):
                     scan_result = scan_file(session["host_in_file"], log_event=False)
                 except Exception as exc:
                     print("[WARN] Scanner failed for {0}: {1}".format(file_name, exc))
-                    scan_result = None
+                    scan_result = self._scanner_failed_result(session["host_in_file"], str(exc))
             else:
-                scan_result = None
+                scan_result = self._scanner_failed_result(session["host_in_file"], "Scanner module was not available.")
 
             if scan_result:
                 self._log_scan_result(
@@ -505,13 +508,20 @@ class SandboxDownloadMonitor(object):
                 SANDBOX_GUEST_IN_DIR,
             ))
 
-            resolution = self._wait_for_session_resolution(session, SANDBOX_RELEASE_WAIT_SECONDS)
-            if resolution == "timeout":
-                print("[WARN] Timed out waiting for sandbox action: {0}".format(file_name))
+            sandbox_action = self._wait_for_sandbox_action(session, SANDBOX_RELEASE_WAIT_SECONDS)
+            removed = sandbox_action in {"approved", "rejected", "removed"}
+            if sandbox_action == "timeout":
+                print("[WARN] Timed out waiting for file removal in sandbox: {0}".format(file_name))
             else:
                 self._log_action("FILE_REMOVED_FROM_SANDBOX", session["host_in_file"])
 
-            if resolution in {"approved", "rejected", "removed"}:
+            if removed:
+                if sandbox_action == "removed" and not os.path.exists(session["reject_marker"]):
+                    try:
+                        with open(session["reject_marker"], "w", encoding="utf-8") as handle:
+                            handle.write("rejected\n")
+                    except OSError:
+                        pass
                 self._wait_for_sandbox_exit(sandbox_process, SANDBOX_GUEST_EXIT_GRACE_SECONDS)
 
             if os.path.exists(session["host_out_file"]):
@@ -520,9 +530,9 @@ class SandboxDownloadMonitor(object):
                     self._log_action("USER_ALLOWED", final_target)
                 else:
                     print("[WARN] Failed to move approved file to Downloads: {0}".format(file_name))
-            elif resolution == "approved":
+            elif sandbox_action == "approved":
                 self._log_action("USER_ALLOWED", file_name)
-            elif resolution in {"rejected", "removed"}:
+            elif removed:
                 self._log_action("USER_REJECTED", file_name)
 
         except Exception as exc:
@@ -636,6 +646,3 @@ class SandboxDownloadMonitor(object):
 if __name__ == "__main__":
     app = SandboxDownloadMonitor()
     app.run()
-
-
-

@@ -23,6 +23,7 @@ htmlcov/
 # Virtual environments
 .venv/
 .venv-ml/
+.venv-ml-broken/
 venv/
 env/
 ENV/
@@ -32,25 +33,27 @@ ENV/
 .env.*
 
 # Backend runtime artifacts
-Backend/app/reports/*.jsonl
-Backend/app/reports/*.log
-Backend/*.log
+cloud/backend/app/reports/*.jsonl
+cloud/backend/app/reports/*.log
+cloud/backend/*.log
+cloud/backend/app/uploads/
+cloud/backend/tmp/
 
 # Frontend / Node
-Frontend/node_modules/
-Frontend/dist/
-Frontend/.vite/
-Frontend/.env
-Frontend/.env.*
-Frontend/npm-debug.log*
-Frontend/yarn-debug.log*
-Frontend/yarn-error.log*
-Frontend/pnpm-debug.log*
+user/Frontend/node_modules/
+user/Frontend/dist/
+user/Frontend/.vite/
+user/Frontend/.env
+user/Frontend/.env.*
+user/Frontend/npm-debug.log*
+user/Frontend/yarn-debug.log*
+user/Frontend/yarn-error.log*
+user/Frontend/pnpm-debug.log*
 
 # Sandbox runtime artifacts
-sandbox/scripts/stack-state.json
-sandbox/*.log
-sandbox/*.tmp
+cloud/sandbox/scripts/stack-state.json
+cloud/sandbox/*.log
+cloud/sandbox/*.tmp
 
 # General logs / temp
 *.log
@@ -63,12 +66,13 @@ build/
 dist/
 *.egg-info/
 
-
-# ML models
+# ML model files
 *.bin
 *.pt
 *.pth
 *.npz
 
-# Node
-**/node_modules/
+# Keep the cloud scanner model bundle with the cloud/backend package.
+!cloud/backend/app/models/
+!cloud/backend/app/models/**
+cloud/backend/app/models/stg_models/model.bin
