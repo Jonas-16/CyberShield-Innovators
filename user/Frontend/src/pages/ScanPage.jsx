@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { scopedKey } from '../auth';
 
 const API_BASE_URL = import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:8000';
+const WATCHER_URL = import.meta.env.VITE_WATCHER_URL || 'http://127.0.0.1:8765';
 const LATEST_SCAN_KEY = 'latestCloudScan';
 
 function isPendingResult(payload) {
@@ -76,14 +78,36 @@ function buildDetailRows(result) {
   ].filter((item) => item.value !== '-');
 }
 
-export default function ScanPage() {
+async function loadDeviceInfo() {
+  try {
+    const response = await fetch(`${WATCHER_URL}/api/device`);
+    if (!response.ok) return null;
+    return response.json();
+  } catch (_) {
+    return null;
+  }
+}
+
+function uploadUrl(userId, deviceInfo) {
+  const params = new URLSearchParams({ user_id: userId });
+  if (deviceInfo?.device_id) params.set('device_id', deviceInfo.device_id);
+  if (deviceInfo?.device_name) params.set('device_name', deviceInfo.device_name);
+  if (deviceInfo?.os_name) params.set('os_name', deviceInfo.os_name);
+  if (deviceInfo?.os_version) params.set('os_version', deviceInfo.os_version);
+  if (deviceInfo?.machine) params.set('machine', deviceInfo.machine);
+  return `${API_BASE_URL}/api/scan/upload?${params.toString()}`;
+}
+
+export default function ScanPage({ currentUser }) {
   const [selectedFile, setSelectedFile] = useState(null);
   const [isUploading, setIsUploading] = useState(false);
   const [message, setMessage] = useState('');
   const [result, setResult] = useState(null);
+  const userId = currentUser?.id || 'guest';
+  const latestScanKey = scopedKey(LATEST_SCAN_KEY, userId);
 
   useEffect(() => {
-    const raw = localStorage.getItem(LATEST_SCAN_KEY);
+    const raw = localStorage.getItem(latestScanKey);
     if (!raw) {
       return;
     }
@@ -100,7 +124,7 @@ export default function ScanPage() {
     } catch (_) {
       // Ignore malformed cached payloads.
     }
-  }, []);
+  }, [latestScanKey]);
 
 
   useEffect(() => {
@@ -113,7 +137,7 @@ export default function ScanPage() {
 
     const poll = async () => {
       try {
-        const response = await fetch(`${API_BASE_URL}/api/scan/latest`);
+        const response = await fetch(`${API_BASE_URL}/api/scan/latest?user_id=${encodeURIComponent(userId)}`);
         if (!response.ok) return;
         const payload = await response.json();
         if (!active) {
@@ -131,7 +155,7 @@ export default function ScanPage() {
           return;
         }
 
-        localStorage.setItem(LATEST_SCAN_KEY, JSON.stringify(payload));
+        localStorage.setItem(latestScanKey, JSON.stringify(payload));
         setResult(payload);
         setMessage(getStatusMessage(payload));
       } catch (_) {
@@ -146,7 +170,7 @@ export default function ScanPage() {
       active = false;
       clearInterval(timer);
     };
-  }, [result?.file_name, result?.status]);
+  }, [result?.file_name, result?.status, latestScanKey, userId]);
 
   const currentStep = useMemo(() => {
     if (isUploading) return 2;
@@ -173,7 +197,8 @@ export default function ScanPage() {
     formData.append('file', file);
 
     try {
-      const response = await fetch(`${API_BASE_URL}/api/scan/upload`, {
+      const deviceInfo = await loadDeviceInfo();
+      const response = await fetch(uploadUrl(userId, deviceInfo), {
         method: 'POST',
         body: formData
       });
@@ -183,7 +208,7 @@ export default function ScanPage() {
         throw new Error(payload?.detail || 'Upload failed');
       }
 
-      localStorage.setItem(LATEST_SCAN_KEY, JSON.stringify(payload));
+      localStorage.setItem(latestScanKey, JSON.stringify(payload));
       setResult(payload);
       setMessage(getStatusMessage(payload));
     } catch (error) {
@@ -203,7 +228,7 @@ export default function ScanPage() {
     <section className="page">
       <h2>Scan Page</h2>
       <p className="page-help">
-        Select a file on this user laptop. The UI uploads it to the backend scanner and shows the result here.
+        Select a file on {currentUser?.name}'s laptop. The UI uploads it to the backend scanner and shows the result here.
       </p>
 
       <div className="card scan-config-card">

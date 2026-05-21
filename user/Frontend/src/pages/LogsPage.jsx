@@ -69,16 +69,23 @@ function safetyScore(entry, status) {
   return `${score} / 100`;
 }
 
-export default function LogsPage() {
+function deviceLabel(entry) {
+  const name = entry?.device_name || 'Unknown device';
+  const os = [entry?.os_name, entry?.os_version].filter(Boolean).join(' ');
+  return os ? `${name} (${os})` : name;
+}
+
+export default function LogsPage({ currentUser }) {
   const [items, setItems] = useState([]);
   const [message, setMessage] = useState('');
+  const userId = currentUser?.id || 'guest';
 
   useEffect(() => {
     let active = true;
 
     const load = async () => {
       try {
-        const response = await fetch(`${API_BASE_URL}/api/scan/logs?limit=100`);
+        const response = await fetch(`${API_BASE_URL}/api/scan/logs?limit=100&user_id=${encodeURIComponent(userId)}`);
         if (!response.ok) {
           const payload = await response.json();
           throw new Error(payload?.detail || 'Failed to load scan logs');
@@ -101,12 +108,12 @@ export default function LogsPage() {
       active = false;
       clearInterval(timer);
     };
-  }, []);
+  }, [userId]);
 
   return (
     <section className="page">
       <h2>Logs Page</h2>
-      <p className="page-help">This is your scan history. Newest scan appears at the top.</p>
+      <p className="page-help">This is {currentUser?.name}'s scan history. Newest scan appears at the top.</p>
       {message && <p className="scan-message">{message}</p>}
 
       <div className="card table-wrap">
@@ -116,6 +123,7 @@ export default function LogsPage() {
               <th>File Name</th>
               <th>Status</th>
               <th>Safety Score</th>
+              <th>Device</th>
               <th>Engine</th>
               <th>Date</th>
             </tr>
@@ -123,7 +131,7 @@ export default function LogsPage() {
           <tbody>
             {items.length === 0 ? (
               <tr>
-                <td colSpan={5}>No scan logs yet.</td>
+                <td colSpan={6}>No scan logs yet.</td>
               </tr>
             ) : (
               items.map((entry, idx) => {
@@ -133,6 +141,7 @@ export default function LogsPage() {
                     <td>{entry.file_name || '-'}</td>
                     <td><span className={statusClass(status)}>{status}</span></td>
                     <td>{safetyScore(entry, status)}</td>
+                    <td>{deviceLabel(entry)}</td>
                     <td>{entry.engine || '-'}</td>
                     <td>{formatDate(entry.ts)}</td>
                   </tr>

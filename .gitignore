@@ -49,6 +49,10 @@ user/Frontend/npm-debug.log*
 user/Frontend/yarn-debug.log*
 user/Frontend/yarn-error.log*
 user/Frontend/pnpm-debug.log*
+user/watcher/watcher_config.json
+user/watcher/watcher_state.json
+user/watcher/watcher_events.jsonl
+user/watcher/device_identity.json
 
 # Sandbox runtime artifacts
 cloud/sandbox/scripts/stack-state.json

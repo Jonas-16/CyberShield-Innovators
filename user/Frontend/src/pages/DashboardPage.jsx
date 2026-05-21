@@ -15,16 +15,17 @@ function scanKey(entry) {
   return `${entry?.file_name || ''}:${entry?.path || ''}`;
 }
 
-export default function DashboardPage() {
+export default function DashboardPage({ currentUser }) {
   const [logs, setLogs] = useState([]);
   const [message, setMessage] = useState('');
+  const userId = currentUser?.id || 'guest';
 
   useEffect(() => {
     let active = true;
 
     const loadLogs = async () => {
       try {
-        const response = await fetch(`${API_BASE_URL}/api/scan/logs?limit=500`);
+        const response = await fetch(`${API_BASE_URL}/api/scan/logs?limit=500&user_id=${encodeURIComponent(userId)}`);
         if (!response.ok) {
           const payload = await response.json();
           throw new Error(payload?.detail || 'Failed to load dashboard stats');
@@ -48,7 +49,7 @@ export default function DashboardPage() {
       active = false;
       clearInterval(timer);
     };
-  }, []);
+  }, [userId]);
 
   const stats = useMemo(() => {
     const uniqueScans = new Map();
@@ -80,7 +81,7 @@ export default function DashboardPage() {
           <p className="hero-kicker">Cyber Shield Innovators</p>
           <h2>User-to-cloud file scanning</h2>
           <p className="page-help">
-            The user laptop runs this UI. Files are uploaded to the backend scanner, which can run on another demo laptop now and a cloud server later.
+            {currentUser?.name}'s laptop runs this UI. Files are uploaded to the backend scanner, which can run on another demo laptop now and a cloud server later.
           </p>
         </div>
         <div className="hero-pill-stack">

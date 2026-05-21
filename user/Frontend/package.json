@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:full": "powershell -ExecutionPolicy Bypass -File ../Start-FrontendAndWatcher.ps1",
     "build": "vite build",
     "preview": "vite preview"
   },

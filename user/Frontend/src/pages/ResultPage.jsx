@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { scopedKey } from '../auth';
 
 const API_BASE_URL = import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:8000';
+const WATCHER_URL = import.meta.env.VITE_WATCHER_URL || 'http://127.0.0.1:8765';
 const CLEARED_RESULT_KEY = 'clearedResultMarker';
 const LATEST_SCAN_KEY = 'latestCloudScan';
 const LATEST_POLL_INTERVAL_MS = 5000;
@@ -54,6 +56,31 @@ async function saveBlobWithPicker(blob, fileName) {
   anchor.click();
   anchor.remove();
   URL.revokeObjectURL(url);
+}
+
+async function restoreFromWatcher(fileName) {
+  const response = await fetch(`${WATCHER_URL}/api/files/${encodeURIComponent(fileName)}/restore`, {
+    method: 'POST'
+  });
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new Error(payload?.detail || 'No watcher record found for this backend-held file.');
+  }
+  return payload;
+}
+
+async function deleteFromWatcher(fileName) {
+  const response = await fetch(`${WATCHER_URL}/api/files/${encodeURIComponent(fileName)}`, {
+    method: 'DELETE'
+  });
+  if (response.status === 404) {
+    return null;
+  }
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new Error(payload?.detail || 'Failed to update watcher record.');
+  }
+  return payload;
 }
 
 function buildMarker(payload) {
@@ -148,14 +175,18 @@ function formatRiskPercent(risk) {
   return `${riskPercent.toFixed(2)}%`;
 }
 
-export default function ResultPage({ overallResult }) {
+export default function ResultPage({ overallResult, currentUser }) {
   const [fileInfo, setFileInfo] = useState(null);
   const [message, setMessage] = useState('');
   const [isBusy, setIsBusy] = useState(false);
   const [isManualUpload, setIsManualUpload] = useState(false);
+  const [watcherFile, setWatcherFile] = useState(null);
+  const userId = currentUser?.id || 'guest';
+  const latestScanKey = scopedKey(LATEST_SCAN_KEY, userId);
+  const clearedResultKey = scopedKey(CLEARED_RESULT_KEY, userId);
 
   useEffect(() => {
-    const raw = localStorage.getItem(LATEST_SCAN_KEY);
+    const raw = localStorage.getItem(latestScanKey);
     if (raw) {
       try {
         const parsed = JSON.parse(raw);
@@ -163,17 +194,17 @@ export default function ResultPage({ overallResult }) {
         setIsManualUpload(isDirectBackendUpload(parsed));
         return;
       } catch (_) {
-        localStorage.removeItem(LATEST_SCAN_KEY);
+        localStorage.removeItem(latestScanKey);
       }
     }
 
     const loadLatest = async () => {
       try {
-        const response = await fetch(`${API_BASE_URL}/api/scan/latest`);
+        const response = await fetch(`${API_BASE_URL}/api/scan/latest?user_id=${encodeURIComponent(userId)}`);
         if (!response.ok) return;
         const payload = await response.json();
         if (isTerminalPayload(payload)) return;
-        const clearedMarker = localStorage.getItem(CLEARED_RESULT_KEY);
+        const clearedMarker = localStorage.getItem(clearedResultKey);
         const marker = buildMarker(payload);
         if (clearedMarker && clearedMarker === marker) {
           return;
@@ -187,7 +218,7 @@ export default function ResultPage({ overallResult }) {
     };
 
     loadLatest();
-  }, []);
+  }, [clearedResultKey, latestScanKey, userId]);
 
   useEffect(() => {
     let active = true;
@@ -198,14 +229,14 @@ export default function ResultPage({ overallResult }) {
       }
 
       try {
-        const response = await fetch(`${API_BASE_URL}/api/scan/latest`);
+        const response = await fetch(`${API_BASE_URL}/api/scan/latest?user_id=${encodeURIComponent(userId)}`);
         if (!response.ok) return;
 
         const payload = await response.json();
         if (!active) return;
         if (isTerminalPayload(payload)) return;
 
-        const clearedMarker = localStorage.getItem(CLEARED_RESULT_KEY);
+        const clearedMarker = localStorage.getItem(clearedResultKey);
         const marker = buildMarker(payload);
         if (clearedMarker && clearedMarker === marker) {
           return;
@@ -226,7 +257,7 @@ export default function ResultPage({ overallResult }) {
       active = false;
       clearInterval(timer);
     };
-  }, [fileInfo?.file_name, isManualUpload]);
+  }, [fileInfo?.file_name, isManualUpload, clearedResultKey, userId]);
 
   useEffect(() => {
     const fileName = fileInfo?.file_name;
@@ -234,21 +265,17 @@ export default function ResultPage({ overallResult }) {
 
     const refresh = async () => {
       try {
-        const response = await fetch(`${API_BASE_URL}/api/scan/results/${encodeURIComponent(fileName)}`);
+        const response = await fetch(`${API_BASE_URL}/api/scan/results/${encodeURIComponent(fileName)}?user_id=${encodeURIComponent(userId)}`);
         if (response.status === 404) {
-          localStorage.removeItem(LATEST_SCAN_KEY);
-          setFileInfo(null);
-          setIsManualUpload(false);
-
           try {
-            const latestResponse = await fetch(`${API_BASE_URL}/api/scan/latest`);
+            const latestResponse = await fetch(`${API_BASE_URL}/api/scan/latest?user_id=${encodeURIComponent(userId)}`);
             if (latestResponse.ok) {
               const latestPayload = await latestResponse.json();
               if (isTerminalPayload(latestPayload)) {
                 setMessage('No cloud scan result is currently available.');
                 return;
               }
-              const clearedMarker = localStorage.getItem(CLEARED_RESULT_KEY);
+              const clearedMarker = localStorage.getItem(clearedResultKey);
               const marker = buildMarker(latestPayload);
               if (!clearedMarker || clearedMarker !== marker) {
                 setFileInfo(buildLatestPayload(latestPayload));
@@ -259,14 +286,12 @@ export default function ResultPage({ overallResult }) {
           } catch (_) {
             // ignore latest-result fallback failure
           }
-
-          setMessage('No cloud scan result is currently available.');
           return;
         }
         if (!response.ok) return;
         const payload = await response.json();
         if (isTerminalPayload(payload)) {
-          localStorage.removeItem(LATEST_SCAN_KEY);
+          localStorage.removeItem(latestScanKey);
           setFileInfo(null);
           setIsManualUpload(false);
           setMessage('No cloud scan result is currently available.');
@@ -274,7 +299,7 @@ export default function ResultPage({ overallResult }) {
         }
         setFileInfo(payload);
         setIsManualUpload(isDirectBackendUpload(payload));
-        localStorage.setItem(LATEST_SCAN_KEY, JSON.stringify(payload));
+        localStorage.setItem(latestScanKey, JSON.stringify(payload));
       } catch (_) {
         // keep cached result when backend is unavailable
       }
@@ -284,6 +309,39 @@ export default function ResultPage({ overallResult }) {
     const timer = setInterval(refresh, 2000);
 
     return () => clearInterval(timer);
+  }, [fileInfo?.file_name, isManualUpload, clearedResultKey, latestScanKey, userId]);
+
+  useEffect(() => {
+    const fileName = fileInfo?.file_name;
+    if (!fileName || isManualUpload) {
+      setWatcherFile(null);
+      return;
+    }
+
+    let active = true;
+
+    const loadWatcherFile = async () => {
+      try {
+        const response = await fetch(`${WATCHER_URL}/api/files/${encodeURIComponent(fileName)}`);
+        if (response.status === 404) {
+          if (active) setWatcherFile(null);
+          return;
+        }
+        if (!response.ok) return;
+        const payload = await response.json();
+        if (active) setWatcherFile(payload);
+      } catch (_) {
+        if (active) setWatcherFile(null);
+      }
+    };
+
+    loadWatcherFile();
+    const timer = setInterval(loadWatcherFile, 2000);
+
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
   }, [fileInfo?.file_name, isManualUpload]);
 
   const scan = fileInfo?.scan_result || null;
@@ -303,7 +361,13 @@ export default function ResultPage({ overallResult }) {
     postAction === 'manual_review_required'
   );
   const showSaveButton = hasFile && !isProcessing && !isTerminalResult && !isManualUpload && postAction !== 'auto_saved_safe' && postAction !== 'auto_deleted_blocked';
-  const showDeleteButton = hasFile && !isProcessing && !isTerminalResult && ((!isManualUpload && postAction !== 'auto_saved_safe' && postAction !== 'auto_deleted_blocked') || (isManualUpload && !postAction));
+  const isAutoRestored = watcherFile?.status === 'restored' && watcherFile?.restored_reason === 'safe_scan_result';
+  const restoredPath = watcherFile?.original_path || '';
+  const savedNotice = isAutoRestored
+    ? `Safe file automatically saved to ${restoredPath}.`
+    : '';
+  const shouldShowSaveButton = showSaveButton && !isAutoRestored;
+  const showDeleteButton = hasFile && !isProcessing && !isTerminalResult && !isAutoRestored && ((!isManualUpload && postAction !== 'auto_saved_safe' && postAction !== 'auto_deleted_blocked') || (isManualUpload && !postAction));
   const showClearButton = hasFile;
   const canDelete = showDeleteButton;
 
@@ -326,10 +390,24 @@ export default function ResultPage({ overallResult }) {
     }
 
     setIsBusy(true);
-    setMessage('Choose where to save the file...');
+    setMessage('Restoring scanned file...');
 
     try {
-      const response = await fetch(`${API_BASE_URL}/api/scan/files/${encodeURIComponent(fileInfo.file_name)}`);
+      if (!isManualUpload) {
+        try {
+          const restored = await restoreFromWatcher(fileInfo.file_name);
+          await fetch(`${API_BASE_URL}/api/scan/files/${encodeURIComponent(fileInfo.file_name)}?user_id=${encodeURIComponent(userId)}`, { method: 'DELETE' });
+          localStorage.removeItem(latestScanKey);
+          setFileInfo(null);
+          setIsManualUpload(false);
+          setMessage(`File restored to ${restored.path}.`);
+          return;
+        } catch (_) {
+          setMessage('No watcher record found. Choose where to save the backend copy...');
+        }
+      }
+
+      const response = await fetch(`${API_BASE_URL}/api/scan/files/${encodeURIComponent(fileInfo.file_name)}?user_id=${encodeURIComponent(userId)}`);
       if (!response.ok) {
         const payload = await response.json();
         throw new Error(payload?.detail || 'Failed to fetch file');
@@ -339,26 +417,26 @@ export default function ResultPage({ overallResult }) {
       await saveBlobWithPicker(blob, fileInfo.file_name);
 
       if (isActiveSandboxReview) {
-        const approveResponse = await fetch(`${API_BASE_URL}/api/scan/files/${encodeURIComponent(fileInfo.file_name)}/approve?restore_to_downloads=false`, {
+        const approveResponse = await fetch(`${API_BASE_URL}/api/scan/files/${encodeURIComponent(fileInfo.file_name)}/approve?restore_to_downloads=false&user_id=${encodeURIComponent(userId)}`, {
           method: 'POST'
         });
         if (!approveResponse.ok) {
           const payload = await approveResponse.json();
           throw new Error(payload?.detail || 'Failed to approve file');
         }
-        localStorage.removeItem(LATEST_SCAN_KEY);
+        localStorage.removeItem(latestScanKey);
         setFileInfo(null);
         setIsManualUpload(false);
         setMessage('File saved, approved, and removed from sandbox. The sandbox session will now close.');
         return;
       }
 
-      const deleteResponse = await fetch(`${API_BASE_URL}/api/scan/files/${encodeURIComponent(fileInfo.file_name)}`, { method: 'DELETE' });
+      const deleteResponse = await fetch(`${API_BASE_URL}/api/scan/files/${encodeURIComponent(fileInfo.file_name)}?user_id=${encodeURIComponent(userId)}`, { method: 'DELETE' });
       if (!deleteResponse.ok) {
         const payload = await deleteResponse.json();
         throw new Error(payload?.detail || 'Failed to remove file after save');
       }
-      localStorage.removeItem(LATEST_SCAN_KEY);
+      localStorage.removeItem(latestScanKey);
       setFileInfo(null);
       setIsManualUpload(false);
       setMessage('File saved and removed from sandbox.');
@@ -376,12 +454,16 @@ export default function ResultPage({ overallResult }) {
     }
 
     setIsBusy(true);
-    setMessage('Deleting backend copy...');
+    setMessage('Deleting scanned file...');
 
     try {
+      if (!isManualUpload) {
+        await deleteFromWatcher(fileInfo.file_name);
+      }
+
       const actionPath = isActiveSandboxReview
-        ? `/api/scan/files/${encodeURIComponent(fileInfo.file_name)}/reject`
-        : `/api/scan/files/${encodeURIComponent(fileInfo.file_name)}`;
+        ? `/api/scan/files/${encodeURIComponent(fileInfo.file_name)}/reject?user_id=${encodeURIComponent(userId)}`
+        : `/api/scan/files/${encodeURIComponent(fileInfo.file_name)}?user_id=${encodeURIComponent(userId)}`;
       const response = await fetch(`${API_BASE_URL}${actionPath}`, {
         method: isActiveSandboxReview ? 'POST' : 'DELETE'
       });
@@ -392,9 +474,9 @@ export default function ResultPage({ overallResult }) {
 
       const marker = buildMarker(fileInfo);
       if (marker !== ':::') {
-        localStorage.setItem(CLEARED_RESULT_KEY, marker);
+        localStorage.setItem(clearedResultKey, marker);
       }
-      localStorage.removeItem(LATEST_SCAN_KEY);
+      localStorage.removeItem(latestScanKey);
       setFileInfo(null);
       setIsManualUpload(false);
       setMessage(
@@ -412,9 +494,9 @@ export default function ResultPage({ overallResult }) {
   const clearResults = () => {
     const marker = buildMarker(fileInfo || scan || {});
     if (marker !== ':::') {
-      localStorage.setItem(CLEARED_RESULT_KEY, marker);
+      localStorage.setItem(clearedResultKey, marker);
     }
-    localStorage.removeItem(LATEST_SCAN_KEY);
+    localStorage.removeItem(latestScanKey);
     setFileInfo(null);
     setIsManualUpload(false);
     setMessage('Results cleared.');
@@ -447,7 +529,7 @@ export default function ResultPage({ overallResult }) {
       </div>
 
       <div className="action-row">
-        {showSaveButton && (
+        {shouldShowSaveButton && (
           <button type="button" className="btn" onClick={saveFile} disabled={isBusy || !hasFile}>Save</button>
         )}
         {showClearButton && (
@@ -458,6 +540,7 @@ export default function ResultPage({ overallResult }) {
         )}
       </div>
       {fileInfo?.file_name && <p className="scan-file">Scanned file: {fileInfo.file_name}</p>}
+      {savedNotice && <p className="scan-message">{savedNotice}</p>}
       {message && <p className="scan-message">{message}</p>}
     </section>
   );

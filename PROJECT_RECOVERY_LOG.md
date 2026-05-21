@@ -184,3 +184,126 @@ If ML falls back to heuristics again:
 2. Open `http://127.0.0.1:8000/api/scan/ml-status` on the cloud PC.
 3. Install any missing module into `.venv-ml`, not Anaconda base.
 4. Restart backend after installing dependencies.
+
+## Update - 2026-05-16
+
+Working demo state:
+- Manual upload scanning from the user frontend to the cloud backend is working.
+- Dashboard and Logs pages update after scans are completed.
+- Cloud backend ML status was verified locally with both scanner stacks ready:
+  - `stg.ready`: `true`
+  - `zd.ready`: `true`
+- `/api/scan/logs?limit=100` returned a valid response from the cloud backend. It returns an empty list before scans and then fills after files are scanned.
+- Folder monitoring is now implemented through a user-side watcher process. The browser Settings page saves folder paths and sends them to the local watcher, while the watcher monitors Windows folders and uploads supported new files to the cloud backend.
+
+Important networking note:
+- `http://192.168.1.25:8000/...` was only an example backend IP in earlier instructions.
+- The working frontend should use the actual cloud PC Wi-Fi/Ethernet IPv4 in `user/Frontend/.env`.
+- If `/api/health` works but `/api/scan/ml-status` gives `{"detail":"Not Found"}`, check that the request is reaching the correct cloud backend app, not the older sandbox backend or a different device.
+
+Cloud backend run command:
+
+```powershell
+cd "D:\Sem VIII\Project\CyberShield Innovators\cloud\backend"
+.\.venv-ml\Scripts\python.exe -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+Cloud backend verification commands:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8000/api/scan/ml-status | ConvertTo-Json -Depth 10
+Invoke-RestMethod "http://127.0.0.1:8000/api/scan/logs?limit=100" | ConvertTo-Json -Depth 10
+```
+
+Expected verified status:
+
+```json
+{
+  "stg": {
+    "ready": true,
+    "error": null
+  },
+  "zd": {
+    "ready": true,
+    "error": null
+  }
+}
+```
+
+User frontend run command:
+
+```powershell
+cd "D:\Sem VIII\Project\CyberShield Innovators\user\Frontend"
+npm run dev -- --host 0.0.0.0
+```
+
+User frontend `.env` format:
+
+```env
+VITE_BACKEND_URL=http://<REAL_CLOUD_PC_IPV4>:8000
+```
+
+User folder watcher run command:
+
+```powershell
+cd "D:\Sem VIII\Project\CyberShield Innovators\user\watcher"
+pip install -r requirements.txt
+$env:CYBERSHIELD_BACKEND_URL="http://<REAL_CLOUD_PC_IPV4>:8000"
+python folder_watcher.py
+```
+
+Folder watcher behavior:
+- Runs locally on the user PC at `http://127.0.0.1:8765`.
+- The Settings page connects to the watcher and shows `Watcher connected` when it is running.
+- Added folder paths are saved to the watcher config and to frontend local storage.
+- New supported files placed inside monitored folders are uploaded to the cloud backend automatically.
+- Existing files already present in a folder are remembered when settings are saved, so they are not all uploaded immediately by default.
+
+Supported watcher file types:
+
+```text
+.exe, .jpg, .jpeg, .jfif, .png, .bmp, .gif, .tif, .tiff, .webp
+```
+
+Files changed for this working state:
+- `user/Frontend/src/App.jsx`
+  - Added the Settings page to the frontend navigation.
+- `user/Frontend/src/pages/SettingsPage.jsx`
+  - Added folder path management.
+  - Added local watcher connection/status display.
+  - Sends monitored folders and backend URL to the watcher.
+  - Moved the light/dark theme switch into Settings.
+- `user/Frontend/app.css`
+  - Added Settings page and watcher status styling.
+- `user/watcher/folder_watcher.py`
+  - Added the user-side folder monitor and upload service.
+- `user/watcher/requirements.txt`
+  - Added watcher dependencies.
+- `.gitignore`
+  - Ignores watcher runtime config/state/event files.
+- `Instructions.txt`
+  - Added watcher run instructions.
+
+Verification commands used after the watcher/frontend changes:
+
+```powershell
+cd "D:\Sem VIII\Project\CyberShield Innovators\user\Frontend"
+npm.cmd run build
+```
+
+```powershell
+cd "D:\Sem VIII\Project\CyberShield Innovators"
+python -m py_compile user\watcher\folder_watcher.py
+```
+
+Verified result summary:
+- Frontend production build completed successfully.
+- `user/watcher/folder_watcher.py` passed Python syntax compilation.
+- End-to-end app behavior was confirmed by scanning files successfully, seeing results, and seeing the Logs page update.
+
+If folder monitoring does nothing:
+1. Confirm the user-side watcher terminal is running.
+2. Open the frontend Settings page and check for `Watcher connected`.
+3. Confirm the watcher was started with `CYBERSHIELD_BACKEND_URL` pointing to the real cloud backend IP.
+4. Confirm the downloaded file has a supported extension.
+5. Keep the watcher terminal open during the demo.
