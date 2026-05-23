@@ -1,10 +1,8 @@
 * text=auto
-
 *.py text eol=crlf
 *.ps1 text eol=crlf
 *.bat text eol=crlf
 *.cmd text eol=crlf
-
 *.js text eol=lf
 *.jsx text eol=lf
 *.ts text eol=lf
@@ -15,12 +13,13 @@
 *.md text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf
-
 *.png binary
 *.jpg binary
 *.jpeg binary
 *.gif binary
 *.ico binary
 *.pdf binary
-*.pth binary
-*.npz binary
+*.pth filter=lfs diff=lfs merge=lfs -text
+*.npz filter=lfs diff=lfs merge=lfs -text
+*.bin filter=lfs diff=lfs merge=lfs -text
+*.pt filter=lfs diff=lfs merge=lfs -text

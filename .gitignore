@@ -79,4 +79,3 @@ dist/
 # Keep the cloud scanner model bundle with the cloud/backend package.
 !cloud/backend/app/models/
 !cloud/backend/app/models/**
-cloud/backend/app/models/stg_models/model.bin
