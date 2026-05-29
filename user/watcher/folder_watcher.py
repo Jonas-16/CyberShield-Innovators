@@ -26,8 +26,11 @@ DEVICE_FILE = APP_DIR / "device_identity.json"
 
 DEFAULT_BACKEND_URL = os.environ.get("CYBERSHIELD_BACKEND_URL", "http://127.0.0.1:8000")
 POLL_INTERVAL_SECONDS = float(os.environ.get("CYBERSHIELD_WATCH_INTERVAL", "2"))
-STABLE_SECONDS = float(os.environ.get("CYBERSHIELD_FILE_STABLE_SECONDS", "2"))
+STABLE_SECONDS = float(os.environ.get("CYBERSHIELD_FILE_STABLE_SECONDS", "3"))
+UPLOAD_RETRY_SECONDS = float(os.environ.get("CYBERSHIELD_UPLOAD_RETRY_SECONDS", "300"))
+MAX_UPLOADS_PER_SCAN = max(1, int(os.environ.get("CYBERSHIELD_MAX_UPLOADS_PER_SCAN", "1")))
 SUPPORTED_EXTENSIONS = {".exe", ".jpg", ".jpeg", ".jfif", ".png", ".bmp", ".gif", ".tif", ".tiff", ".webp"}
+WATCHER_STARTED_AT = time.time()
 
 
 def default_watch_folders() -> list[str]:
@@ -51,6 +54,8 @@ app.add_middleware(
 )
 
 lock = threading.Lock()
+worker_start_lock = threading.Lock()
+worker_started = False
 pending: dict[str, dict[str, Any]] = {}
 last_error: str | None = None
 
@@ -180,6 +185,19 @@ def remember_existing_files(folders: list[str]) -> None:
         save_state(state)
 
 
+def suppress_stale_upload_errors() -> None:
+    state = load_state()
+    changed = False
+    for record in state["files"].values():
+        if record.get("status") == "upload_error":
+            record["status"] = "known"
+            record["cleared_reason"] = "watcher_startup_upload_error_suppressed"
+            record["cleared_ts"] = utc_now()
+            changed = True
+    if changed:
+        save_state(state)
+
+
 def write_event(payload: dict[str, Any]) -> None:
     EVENTS_FILE.parent.mkdir(parents=True, exist_ok=True)
     with EVENTS_FILE.open("a", encoding="utf-8") as handle:
@@ -224,7 +242,7 @@ def result_status(payload: dict[str, Any]) -> str:
 
     if decision == "BLOCKED":
         return "Malicious"
-    if prediction == "stego" or decision == "STEGO":
+    if prediction == "stego" or decision in {"STEGO", "UNCERTAIN", "PENDING", "IGNORED"}:
         return "Suspicious"
     if isinstance(risk, (int, float)) and risk >= threshold:
         return "Suspicious"
@@ -305,7 +323,21 @@ def process_backend_held_files(state: dict[str, Any], backend_url: str, user_id:
 
         try:
             payload = fetch_scan_result(backend_url, backend_file_name, user_id)
-            if not payload or payload.get("status") in {"processing", "queued"}:
+            if not payload:
+                record["status"] = "backend_missing"
+                record["missing_ts"] = utc_now()
+                record["missing_reason"] = "backend_result_not_found"
+                write_event({
+                    "ts": record["missing_ts"],
+                    "path": record.get("original_path") or path_key,
+                    "file_name": backend_file_name,
+                    "status": "backend_missing",
+                    "reason": "Backend no longer has an active result for this file.",
+                })
+                changed = True
+                continue
+
+            if payload.get("status") in {"processing", "queued"}:
                 continue
 
             verdict = result_status(payload)
@@ -319,13 +351,17 @@ def process_backend_held_files(state: dict[str, Any], backend_url: str, user_id:
                     state["files"].pop(path_key, None)
                 delete_backend_file(backend_url, backend_file_name, user_id)
             else:
-                record["status"] = "held_for_review"
+                delete_backend_file(backend_url, backend_file_name, user_id)
+                record["status"] = "auto_deleted"
+                record["deleted_reason"] = "unsafe_scan_result"
+                record["deleted_ts"] = utc_now()
                 write_event({
-                    "ts": utc_now(),
+                    "ts": record["deleted_ts"],
                     "path": record.get("original_path") or path_key,
                     "file_name": backend_file_name,
-                    "status": "held_for_review",
+                    "status": "auto_deleted",
                     "scan_result": verdict,
+                    "reason": "Unsafe scan result",
                 })
             changed = True
         except Exception as exc:
@@ -341,6 +377,7 @@ def scan_once() -> None:
     files = state["files"]
     now = time.time()
     changed = process_backend_held_files(state, config["backend_url"], config["user_id"])
+    uploads_started = 0
 
     for path in iter_supported_files(config["folders"]):
         path_key = str(path)
@@ -349,8 +386,26 @@ def scan_once() -> None:
             continue
 
         known = files.get(path_key)
+        if not known:
+            try:
+                modified_at = path.stat().st_mtime
+            except OSError:
+                continue
+            if modified_at < WATCHER_STARTED_AT:
+                files[path_key] = {"signature": signature, "status": "known", "ts": utc_now()}
+                pending.pop(path_key, None)
+                changed = True
+                continue
+
         if known and known.get("signature") == signature:
-            continue
+            if known.get("status") == "upload_error":
+                last_attempt = float(known.get("last_attempt", 0.0) or 0.0)
+                if now - last_attempt >= UPLOAD_RETRY_SECONDS:
+                    pass
+                else:
+                    continue
+            else:
+                continue
 
         current = pending.get(path_key)
         if not current or current.get("signature") != signature:
@@ -360,7 +415,11 @@ def scan_once() -> None:
         if now - float(current.get("first_seen", now)) < STABLE_SECONDS:
             continue
 
+        if uploads_started >= MAX_UPLOADS_PER_SCAN:
+            break
+
         try:
+            uploads_started += 1
             payload = upload_file(path, config["backend_url"], config["user_id"])
             path.unlink()
             event = {
@@ -391,6 +450,18 @@ def scan_once() -> None:
             changed = True
         except Exception as exc:
             last_error = str(exc)
+            files[path_key] = {
+                "signature": signature,
+                "status": "upload_error",
+                "ts": utc_now(),
+                "last_attempt": now,
+                "original_path": path_key,
+                "backend_url": config["backend_url"],
+                "user_id": config["user_id"],
+                "error": last_error,
+            }
+            pending.pop(path_key, None)
+            changed = True
             write_event({"ts": utc_now(), "path": path_key, "file_name": path.name, "status": "error", "error": last_error})
 
     if changed:
@@ -406,11 +477,17 @@ def worker_loop() -> None:
 
 @app.on_event("startup")
 def start_worker() -> None:
-    config = load_config()
-    save_config(config["folders"], config["backend_url"], config["user_id"])
-    remember_existing_files(config["folders"])
-    thread = threading.Thread(target=worker_loop, name="cybershield-folder-watcher", daemon=True)
-    thread.start()
+    global worker_started
+    with worker_start_lock:
+        if worker_started:
+            return
+        config = load_config()
+        save_config(config["folders"], config["backend_url"], config["user_id"])
+        suppress_stale_upload_errors()
+        remember_existing_files(config["folders"])
+        thread = threading.Thread(target=worker_loop, name="cybershield-folder-watcher", daemon=True)
+        thread.start()
+        worker_started = True
 
 
 @app.get("/api/health")

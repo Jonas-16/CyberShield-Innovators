@@ -6,7 +6,12 @@ from importlib import import_module
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+from PIL import Image
+
 SCAN_LOG_FILE = Path(__file__).resolve().parent / "reports" / "scan_events.jsonl"
+DEFAULT_REVIEW_THRESHOLD = 0.65
+DEFAULT_UNSAFE_THRESHOLD = 0.80
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".jfif", ".png", ".bmp", ".gif", ".tif", ".tiff", ".webp"}
 ZD_EXTENSIONS = {".exe"}
@@ -52,11 +57,132 @@ def _normalize_image_result(payload: dict[str, Any], module: Any) -> dict[str, A
     normalized["stego_threshold"] = float(
         payload.get("stego_threshold", getattr(module, "DEFAULT_STEGO_THRESHOLD", 0.5)) or 0.5
     )
+    normalized["review_threshold"] = DEFAULT_REVIEW_THRESHOLD
+    normalized["unsafe_threshold"] = DEFAULT_UNSAFE_THRESHOLD
     normalized["image_size"] = payload.get("image_size", getattr(module, "DEFAULT_IMAGE_SIZE", None))
     normalized.setdefault("predicted_label", "Stego" if is_stego else "Cover")
     normalized.setdefault("decision", "STEGO" if is_stego else "COVER")
     normalized.setdefault("reasons", ["steganography detected"] if is_stego else ["no steganography detected"])
     return normalized
+
+
+def _has_cybershield_sanitized_marker(target: Path) -> bool:
+    try:
+        with Image.open(target) as image:
+            return str(image.info.get("CyberShieldSanitized", "")).lower() == "true"
+    except Exception:
+        return False
+
+
+def _rgb_lsb_planes_are_clear(target: Path) -> bool:
+    try:
+        with Image.open(target) as image:
+            if image.mode not in {"RGB", "RGBA", "L"}:
+                image = image.convert("RGBA" if "A" in image.getbands() else "RGB")
+            arr = np.array(image, dtype=np.uint8)
+    except Exception:
+        return False
+
+    if arr.ndim == 2:
+        return bool(np.all((arr & 1) == 0))
+
+    channels_to_check = min(3, arr.shape[2])
+    return bool(np.all((arr[:, :, :channels_to_check] & 1) == 0))
+
+
+def _looks_like_cleaned_image(target: Path, decoder_result: dict[str, Any]) -> bool:
+    if decoder_result.get("readable_message_found"):
+        return False
+    if int(decoder_result.get("candidate_count") or 0) > 0:
+        return False
+    suspected_tool = str(decoder_result.get("suspected_tool") or "").lower()
+    if decoder_result.get("likely_encrypted_or_protected") and "or clean jpeg" not in suspected_tool:
+        return False
+    return _has_cybershield_sanitized_marker(target) and _rgb_lsb_planes_are_clear(target)
+
+
+def _image_scan_is_safe(payload: dict[str, Any]) -> bool:
+    decision = str(payload.get("decision") or "").upper()
+    predicted_label = str(payload.get("predicted_label") or "").lower()
+    warning = str(payload.get("scanner_warning") or "")
+    risk = payload.get("fused_risk")
+    threshold = payload.get("stego_threshold")
+    threshold = float(threshold) if isinstance(threshold, (int, float)) else 0.65
+
+    if warning:
+        return False
+    if decision in {"STEGO", "UNCERTAIN", "PENDING", "IGNORED", "BLOCKED"}:
+        return False
+    if predicted_label == "stego":
+        return False
+    if isinstance(risk, (int, float)) and float(risk) >= threshold:
+        return False
+    return decision in {"COVER", "ALLOWED"} or predicted_label == "cover"
+
+
+def _attach_decoder_result(payload: dict[str, Any], target: Path) -> dict[str, Any]:
+    enriched = dict(payload)
+    if _image_scan_is_safe(enriched):
+        enriched["stego_decoder"] = {
+            "available": False,
+            "skipped": True,
+            "reason": "File is safe; nothing to decode.",
+            "readable_message_found": False,
+            "candidate_count": 0,
+            "artifact_count": 0,
+        }
+        enriched["hidden_payload_found"] = False
+        return enriched
+
+    try:
+        decoder = import_module("app.scanners.stg_decoder.scanner")
+        decoder_result = decoder.scan_file(target)
+    except Exception as exc:
+        enriched["stego_decoder"] = {
+            "available": False,
+            "error": str(exc),
+        }
+        return enriched
+
+    enriched["stego_decoder"] = {
+        **decoder_result,
+        "available": True,
+    }
+
+    reasons = list(enriched.get("reasons") or [])
+    candidate_count = int(decoder_result.get("candidate_count") or 0)
+    suspected_tool = str(decoder_result.get("suspected_tool") or "").lower()
+    generic_jpeg_uncertainty = "or clean jpeg" in suspected_tool
+    cleaned_image = _looks_like_cleaned_image(target, decoder_result)
+
+    if cleaned_image:
+        enriched["decision"] = "COVER"
+        enriched["predicted_label"] = "Cover"
+        enriched["fused_risk"] = min(float(enriched.get("fused_risk") or 0.0), 0.10)
+        enriched["stego_prob"] = min(float(enriched.get("stego_prob") or 0.0), 0.10)
+        enriched["cover_prob"] = max(float(enriched.get("cover_prob") or 0.0), 0.90)
+        enriched["confidence"] = max(float(enriched.get("confidence") or 0.0), 0.90)
+        reasons.append("cleaned image has no recovered payload and RGB LSB planes are clear")
+    elif decoder_result.get("readable_message_found"):
+        enriched["decision"] = "STEGO"
+        enriched["predicted_label"] = "Stego"
+        enriched["fused_risk"] = max(float(enriched.get("fused_risk") or 0.0), 0.95)
+        reasons.append("readable hidden payload recovered")
+    elif decoder_result.get("likely_encrypted_or_protected") and not generic_jpeg_uncertainty:
+        if enriched.get("decision") in {"ALLOWED", "COVER"}:
+            enriched["decision"] = "UNCERTAIN"
+        enriched["fused_risk"] = max(float(enriched.get("fused_risk") or 0.0), 0.70)
+        reasons.append("decoder found protected or encrypted steganography indicators")
+    elif candidate_count > 0:
+        enriched["fused_risk"] = max(float(enriched.get("fused_risk") or 0.0), 0.75)
+        reasons.append("decoder produced hidden-message candidates")
+
+    enriched["reasons"] = list(dict.fromkeys(reason for reason in reasons if reason))
+    enriched["hidden_payload_found"] = bool(decoder_result.get("readable_message_found"))
+    enriched["cleaned_image_verified"] = bool(cleaned_image)
+    enriched["decoder_report_url"] = decoder_result.get("report_url")
+    enriched["sanitized_image_url"] = (decoder_result.get("sanitized_image") or {}).get("url")
+    return enriched
 
 
 def _unsupported_payload(file_path: str | Path) -> dict[str, Any]:
@@ -92,6 +218,7 @@ def scan_file(file_path: str | Path, log_event: bool = True, **kwargs: Any):
             log_event=False,
         )
         payload = _normalize_image_result(raw_result, module)
+        payload = _attach_decoder_result(payload, target)
     else:
         payload = module.scan_file(
             target,

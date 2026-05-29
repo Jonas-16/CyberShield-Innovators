@@ -21,6 +21,12 @@ def _get_stg_scanner():
     return stg_scanner
 
 
+@lru_cache(maxsize=1)
+def _get_stg_decoder():
+    from app.scanners.stg_decoder import scanner
+    return scanner
+
+
 def write_scan_event(payload: dict[str, Any]) -> dict[str, Any]:
     return _get_zd_scanner().write_scan_event(payload)
 
@@ -74,6 +80,47 @@ def _normalize_stg_result(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _attach_decoder_result(payload: dict[str, Any], target: Path) -> dict[str, Any]:
+    enriched = dict(payload)
+    try:
+        decoder_result = _get_stg_decoder().scan_file(target)
+    except Exception as exc:
+        enriched["stego_decoder"] = {
+            "available": False,
+            "error": str(exc),
+        }
+        return enriched
+
+    enriched["stego_decoder"] = {
+        **decoder_result,
+        "available": True,
+    }
+
+    reasons = list(enriched.get("reasons") or [])
+    candidate_count = int(decoder_result.get("candidate_count") or 0)
+    suspected_tool = str(decoder_result.get("suspected_tool") or "").lower()
+    generic_jpeg_uncertainty = "or clean jpeg" in suspected_tool
+
+    if decoder_result.get("readable_message_found"):
+        enriched["decision"] = "STEGO"
+        enriched["predicted_label"] = "Stego"
+        enriched["fused_risk"] = max(float(enriched.get("fused_risk") or 0.0), 0.95)
+        reasons.append("readable hidden payload recovered")
+    elif decoder_result.get("likely_encrypted_or_protected") and not generic_jpeg_uncertainty:
+        enriched["decision"] = "UNCERTAIN" if enriched.get("decision") in {"ALLOWED", "COVER"} else enriched.get("decision")
+        enriched["fused_risk"] = max(float(enriched.get("fused_risk") or 0.0), 0.70)
+        reasons.append("decoder found protected or encrypted steganography indicators")
+    elif candidate_count > 0:
+        enriched["fused_risk"] = max(float(enriched.get("fused_risk") or 0.0), 0.75)
+        reasons.append("decoder produced hidden-message candidates")
+
+    enriched["reasons"] = list(dict.fromkeys(reason for reason in reasons if reason))
+    enriched["hidden_payload_found"] = bool(decoder_result.get("readable_message_found"))
+    enriched["decoder_report_url"] = decoder_result.get("report_url")
+    enriched["sanitized_image_url"] = (decoder_result.get("sanitized_image") or {}).get("url")
+    return enriched
+
+
 def scan_file(file_path: str | Path, log_event: bool = True, **kwargs: Any) -> dict[str, Any]:
     target = Path(file_path)
 
@@ -88,6 +135,7 @@ def scan_file(file_path: str | Path, log_event: bool = True, **kwargs: Any) -> d
             log_event=False,
         )
         payload = _normalize_stg_result(raw_result)
+        payload = _attach_decoder_result(payload, target)
         if log_event:
             return write_scan_event(payload)
         return payload

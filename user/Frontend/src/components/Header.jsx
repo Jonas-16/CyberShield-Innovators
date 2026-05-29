@@ -1,5 +1,5 @@
 ﻿import React from 'react';
-import logoSrc from '../../Logos/Picsart_26-03-30_21-07-39-025.png';
+import logoSrc from '../../Logos/logo.png';
 
 // header with centered title and optional status pill
 export default function Header({ systemStatus, statusClass, currentUser, onLogout }) {

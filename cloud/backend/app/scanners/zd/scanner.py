@@ -18,20 +18,66 @@ APP_ROOT = Path(__file__).resolve().parents[2]
 MODEL_DIR = APP_ROOT / "models" / "zd_models"
 DEFAULT_MODEL_PATH = MODEL_DIR / "cyber_shield_zero_day.pth"
 DEFAULT_NORM_PATH = MODEL_DIR / "normalization.npz"
+SOREL_MODEL_DIR = MODEL_DIR / "sorel"
 MODEL_PATH = Path(os.environ.get("ZD_MODEL_PATH", str(DEFAULT_MODEL_PATH)))
 NORM_PATH = Path(os.environ.get("ZD_NORM_PATH", str(DEFAULT_NORM_PATH)))
 REPORTS_DIR = APP_ROOT / "reports"
 REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 SCAN_LOG_FILE = REPORTS_DIR / "scan_events.jsonl"
 
+MODEL_DISPLAY_NAME = "Cyber Shield Zero-Day Ensemble"
+MODEL_ARCHITECTURE_NAME = "Averaged Dual Feed-Forward Neural Network Ensemble"
 DEFAULT_BLOCK_THRESHOLD = 0.8
 DEFAULT_ALLOW_THRESHOLD = 0.2
+MODEL_SPECS: tuple[dict[str, Any], ...] = (
+    {
+        "key": "ember",
+        "label": "EMBER-trained model",
+        "model_path": MODEL_PATH,
+        "norm_path": NORM_PATH,
+        "weight": 0.5,
+        "layout": "net",
+    },
+    {
+        "key": "sorel",
+        "label": "SOREL-trained model",
+        "model_path": SOREL_MODEL_DIR / "cyber_shield_zero_day.pth",
+        "norm_path": SOREL_MODEL_DIR / "normalization.npz",
+        "weight": 0.5,
+        "layout": "feature_extractor",
+    },
+)
 
 
 class ScannerStageError(RuntimeError):
     def __init__(self, stage: str, message: str):
         super().__init__(message)
         self.stage = stage
+
+
+def current_model_identity() -> dict[str, Any]:
+    model_components = [
+        {
+            "key": spec["key"],
+            "label": spec["label"],
+            "model_artifact_name": spec["model_path"].name,
+            "model_artifact_path": str(spec["model_path"]),
+            "normalization_artifact_name": spec["norm_path"].name,
+            "normalization_artifact_path": str(spec["norm_path"]),
+            "weight": float(spec["weight"]),
+        }
+        for spec in MODEL_SPECS
+    ]
+    return {
+        "model_name": MODEL_DISPLAY_NAME,
+        "model_architecture": MODEL_ARCHITECTURE_NAME,
+        "model_artifact_name": "ember+sorel ensemble",
+        "model_artifact_path": " | ".join(str(spec["model_path"]) for spec in MODEL_SPECS),
+        "normalization_artifact_name": "ember+sorel normalization",
+        "normalization_artifact_path": " | ".join(str(spec["norm_path"]) for spec in MODEL_SPECS),
+        "ensemble_strategy": "weighted_average",
+        "model_components": model_components,
+    }
 
 
 def _resolve_model_paths() -> tuple[Path, Path]:
@@ -273,15 +319,26 @@ def _combine_scores(static_prob: float, behavior_risk: float | None, fusion_alph
 
 
 def write_scan_event(payload: dict[str, Any]) -> dict[str, Any]:
-    event = dict(payload)
+    event = {**current_model_identity(), **dict(payload)}
     event.setdefault("ts", datetime.utcnow().isoformat(timespec="seconds") + "Z")
     with SCAN_LOG_FILE.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(event) + "\n")
     return event
 
 
+def _read_file_header(file_path: Path, size: int = 2) -> bytes:
+    with file_path.open("rb") as handle:
+        return handle.read(size)
+
+
+def _looks_like_pe_file(file_path: Path) -> bool:
+    try:
+        return _read_file_header(file_path) == b"MZ"
+    except OSError:
+        return False
+
+
 def _heuristic_scan(file_path: Path) -> dict[str, Any]:
-    name = file_path.name.lower()
     suspicious_exts = {".exe", ".dll", ".bat", ".cmd", ".ps1", ".vbs", ".js", ".scr", ".msi"}
     reasons: list[str] = []
     risk = 0.1
@@ -292,9 +349,7 @@ def _heuristic_scan(file_path: Path) -> dict[str, Any]:
         reasons.append(f"suspicious extension: {ext}")
 
     try:
-        with file_path.open("rb") as handle:
-            header = handle.read(2)
-        if header == b"MZ":
+        if _looks_like_pe_file(file_path):
             risk += 0.25
             reasons.append("portable executable header detected")
     except OSError:
@@ -309,12 +364,202 @@ def _heuristic_scan(file_path: Path) -> dict[str, Any]:
         decision = "UNCERTAIN"
 
     return {
+        **current_model_identity(),
         "engine": "heuristic",
         "decision": decision,
         "static_prob": risk,
         "behavior_risk": None,
         "fused_risk": risk,
         "reasons": reasons or ["no high-risk signals detected"],
+    }
+
+
+def _load_checkpoint(model_path: Path, device, torch_module):
+    try:
+        return torch_module.load(str(model_path), map_location=device, weights_only=True)
+    except TypeError:
+        return torch_module.load(str(model_path), map_location=device)
+
+
+def _state_dict_matches_layout(spec: dict[str, Any], state_dict: Any) -> bool:
+    if not isinstance(state_dict, dict) or not state_dict:
+        return False
+    keys = set(state_dict.keys())
+    if spec.get("layout") == "feature_extractor":
+        return "feature_extractor.0.weight" in keys and "classifier.weight" in keys
+    return "net.0.weight" in keys and "net.8.weight" in keys
+
+
+def _normalize_features_for_model(
+    raw_features: np.ndarray,
+    mean: np.ndarray | None,
+    std: np.ndarray | None,
+) -> np.ndarray:
+    features = raw_features.astype(np.float32, copy=True)
+    if mean is None or std is None:
+        return features
+    if features.shape[0] != mean.shape[0] or features.shape[0] != std.shape[0]:
+        raise ScannerStageError(
+            "normalization_shape",
+            f"feature_dim={features.shape[0]}, mean_dim={mean.shape[0]}, std_dim={std.shape[0]}",
+        )
+    std_safe = np.where(std == 0, 1.0, std)
+    return (features - mean) / std_safe
+
+
+def _build_model_for_spec(spec: dict[str, Any], input_dim: int, torch_module, default_model_class):
+    if spec.get("layout") != "feature_extractor":
+        return default_model_class(input_dim)
+
+    nn = torch_module.nn
+
+    class SorelZeroDayDetector(nn.Module):
+        def __init__(self, feature_dim: int):
+            super().__init__()
+            self.feature_extractor = nn.Sequential(
+                nn.Linear(feature_dim, 1024),
+                nn.ReLU(),
+                nn.Dropout(0.2),
+                nn.Linear(1024, 512),
+                nn.ReLU(),
+                nn.Dropout(0.2),
+                nn.Linear(512, 128),
+                nn.ReLU(),
+            )
+            self.classifier = nn.Linear(128, 1)
+
+        def forward(self, x):
+            embedding = self.feature_extractor(x)
+            return self.classifier(embedding)
+
+    return SorelZeroDayDetector(input_dim)
+
+
+def _describe_threat(
+    decision: str,
+    static_prob: float,
+    component_scores: list[dict[str, Any]],
+    fully_ensembled: bool,
+) -> dict[str, Any]:
+    labels = ["portable-executable"] if component_scores else []
+    if decision == "BLOCKED":
+        labels.append("likely-malware")
+        summary = "Likely malicious executable based on the ensemble score."
+    elif decision == "UNCERTAIN":
+        labels.append("suspicious-executable")
+        summary = "Suspicious executable that should stay in manual review."
+    else:
+        labels.append("low-malware-probability")
+        summary = "Low malware probability from the current static models."
+
+    details = ["Current EMBER/SOREL checkpoints are binary malware detectors, not family classifiers."]
+    if not fully_ensembled:
+        details.append("Threat family/type labels are limited because not all ensemble components participated.")
+    else:
+        details.append("No direct ransomware/phishing/family label is available from these checkpoints.")
+
+    return {
+        "issue_labels": labels,
+        "threat_summary": summary,
+        "threat_family": None,
+        "threat_type": None,
+        "threat_label_source": "binary-static-ensemble",
+        "threat_details": details,
+        "risk_band": (
+            "high"
+            if static_prob >= DEFAULT_BLOCK_THRESHOLD
+            else "medium"
+            if static_prob >= DEFAULT_ALLOW_THRESHOLD
+            else "low"
+        ),
+    }
+
+
+def _run_single_model_inference(
+    spec: dict[str, Any],
+    raw_features: np.ndarray,
+    device,
+    model_class,
+    torch_module,
+) -> dict[str, Any]:
+    model_path = Path(spec["model_path"])
+    norm_path = Path(spec["norm_path"])
+    if not model_path.exists():
+        raise ScannerStageError("model_file", f"Model not found: {model_path}")
+
+    try:
+        mean, std = _load_normalization(str(norm_path))
+    except Exception as exc:
+        raise ScannerStageError("load_normalization", f"{spec['label']}: {exc}")
+
+    input_dim = raw_features.shape[0] if mean is None else int(mean.shape[0])
+
+    try:
+        model = _build_model_for_spec(spec, input_dim, torch_module, model_class).to(device)
+    except Exception as exc:
+        raise ScannerStageError("init_model", f"{spec['label']}: {exc}")
+
+    try:
+        checkpoint = _load_checkpoint(model_path, device, torch_module)
+    except Exception as exc:
+        raise ScannerStageError("load_checkpoint", f"{spec['label']}: {exc}")
+
+    state_dict = _extract_state_dict(checkpoint)
+
+    try:
+        missing, unexpected = model.load_state_dict(state_dict, strict=False)
+        if missing or unexpected:
+            raise ScannerStageError(
+                "model_state_mismatch",
+                f"{spec['label']}: missing={len(missing)}, unexpected={len(unexpected)}",
+            )
+        model.eval()
+    except ScannerStageError:
+        raise
+    except Exception as exc:
+        raise ScannerStageError("load_state_dict", f"{spec['label']}: {exc}")
+
+    try:
+        features = _normalize_features_for_model(raw_features, mean, std)
+    except ScannerStageError as exc:
+        raise ScannerStageError(exc.stage, f"{spec['label']}: {exc}")
+    except Exception as exc:
+        raise ScannerStageError("normalize_features", f"{spec['label']}: {exc}")
+
+    try:
+        x = torch_module.tensor(features).unsqueeze(0).to(device)
+        with torch_module.no_grad():
+            static_prob = float(torch_module.sigmoid(model(x)).item())
+    except Exception as exc:
+        raise ScannerStageError("run_inference", f"{spec['label']}: {exc}")
+
+    return {
+        "key": spec["key"],
+        "label": spec["label"],
+        "static_prob": static_prob,
+        "weight": float(spec["weight"]),
+        "model_artifact_name": model_path.name,
+        "model_artifact_path": str(model_path),
+        "normalization_artifact_name": norm_path.name,
+        "normalization_artifact_path": str(norm_path),
+    }
+
+
+def _model_unavailable_result(file_path: Path, exc: Exception) -> dict[str, Any]:
+    heuristic = _heuristic_scan(file_path)
+    reasons = list(heuristic.get("reasons", []))
+    reasons.append("trained model verdict unavailable; result held for review")
+    warning = f"[{exc.stage}] {exc}" if isinstance(exc, ScannerStageError) else str(exc)
+    return {
+        **current_model_identity(),
+        "engine": "ml_unavailable",
+        "decision": "UNCERTAIN",
+        "static_prob": heuristic.get("static_prob"),
+        "behavior_risk": None,
+        "fused_risk": heuristic.get("fused_risk"),
+        "reasons": reasons,
+        "scanner_stage": exc.stage if isinstance(exc, ScannerStageError) else None,
+        "scanner_warning": warning,
     }
 
 
@@ -325,46 +570,51 @@ def _ml_scan(
     fusion_alpha: float,
 ) -> dict[str, Any]:
     try:
-        model_path, norm_path = _resolve_model_paths()
-        bundle = _load_model_bundle(str(model_path), str(norm_path))
+        import torch
     except Exception as exc:
-        if isinstance(exc, ScannerStageError):
-            raise
-        raise ScannerStageError("load_model_bundle", str(exc))
-
-    torch = bundle["torch"]
-    device = bundle["device"]
-    model = bundle["model"]
-    extractor = bundle["extractor"]
-    mean = bundle["mean"]
-    std = bundle["std"]
+        raise ScannerStageError("import_torch", str(exc))
 
     try:
-        features = _extract_features(file_path, extractor)
+        from .model_def import ZeroDayDetector
+    except Exception as exc:
+        raise ScannerStageError("import_model_def", str(exc))
+
+    try:
+        extractor = _init_ember_raw_extractor()
+    except Exception as exc:
+        raise ScannerStageError("init_extractor", str(exc))
+
+    try:
+        raw_features = _extract_features(file_path, extractor)
     except Exception as exc:
         raise ScannerStageError("extract_features", str(exc))
 
     try:
-        if mean is not None and std is not None:
-            if features.shape[0] != mean.shape[0] or features.shape[0] != std.shape[0]:
-                raise ScannerStageError(
-                    "normalization_shape",
-                    f"feature_dim={features.shape[0]}, mean_dim={mean.shape[0]}, std_dim={std.shape[0]}",
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    except Exception as exc:
+        raise ScannerStageError("init_device", str(exc))
+
+    component_scores: list[dict[str, Any]] = []
+    component_errors: list[str] = []
+    for spec in MODEL_SPECS:
+        try:
+            component_scores.append(
+                _run_single_model_inference(
+                    spec,
+                    raw_features=raw_features,
+                    device=device,
+                    model_class=ZeroDayDetector,
+                    torch_module=torch,
                 )
-            std_safe = np.where(std == 0, 1.0, std)
-            features = (features - mean) / std_safe
-    except ScannerStageError:
-        raise
-    except Exception as exc:
-        raise ScannerStageError("normalize_features", str(exc))
+            )
+        except Exception as exc:
+            component_errors.append(f"{spec['label']}: {exc}")
 
-    try:
-        x = torch.tensor(features).unsqueeze(0).to(device)
-        with torch.no_grad():
-            static_prob = float(torch.sigmoid(model(x)).item())
-    except Exception as exc:
-        raise ScannerStageError("run_inference", str(exc))
+    if not component_scores:
+        raise ScannerStageError("ensemble_unavailable", "; ".join(component_errors) or "No model scored the file")
 
+    total_weight = sum(float(item["weight"]) for item in component_scores) or 1.0
+    static_prob = sum(float(item["static_prob"]) * float(item["weight"]) for item in component_scores) / total_weight
     risk = _combine_scores(static_prob, None, fusion_alpha)
     if risk > block_threshold:
         decision = "BLOCKED"
@@ -373,16 +623,26 @@ def _ml_scan(
     else:
         decision = "UNCERTAIN"
 
+    threat = _describe_threat(
+        decision=decision,
+        static_prob=static_prob,
+        component_scores=component_scores,
+        fully_ensembled=(len(component_scores) == len(MODEL_SPECS)),
+    )
+
     return {
+        **current_model_identity(),
         "engine": "ml",
         "decision": decision,
         "static_prob": static_prob,
         "behavior_risk": None,
         "fused_risk": risk,
         "reasons": [],
-        "model_path": str(bundle["model_path"]),
-        "norm_path": str(bundle["norm_path"]),
-        "checkpoint_layout": bundle["checkpoint_layout"],
+        "static_prob_components": component_scores,
+        "component_models_used": [item["key"] for item in component_scores],
+        "component_model_count": len(component_scores),
+        "scanner_warning": "Partial ensemble used. " + " | ".join(component_errors) if component_errors else None,
+        **threat,
     }
 
 
@@ -398,22 +658,24 @@ def scan_file(
         raise FileNotFoundError(f"Target file not found: {target}")
 
     result: dict[str, Any]
-    try:
-        result = _ml_scan(
-            target,
-            block_threshold=block_threshold,
-            allow_threshold=allow_threshold,
-            fusion_alpha=fusion_alpha,
-        )
-    except Exception as exc:
+    if not _looks_like_pe_file(target):
         result = _heuristic_scan(target)
-        if isinstance(exc, ScannerStageError):
-            result["scanner_stage"] = exc.stage
-            result["scanner_warning"] = f"[{exc.stage}] {exc}"
-        else:
-            result["scanner_warning"] = str(exc)
+        reasons = list(result.get("reasons", []))
+        reasons.append("non-PE file; heuristic scan used")
+        result["reasons"] = reasons
+    else:
+        try:
+            result = _ml_scan(
+                target,
+                block_threshold=block_threshold,
+                allow_threshold=allow_threshold,
+                fusion_alpha=fusion_alpha,
+            )
+        except Exception as exc:
+            result = _model_unavailable_result(target, exc)
 
     payload = {
+        **current_model_identity(),
         "path": str(target),
         "file_name": target.name,
         "decision": result["decision"],
@@ -422,6 +684,16 @@ def scan_file(
         "fused_risk": float(result.get("fused_risk", 0.0)),
         "engine": result.get("engine", "unknown"),
         "reasons": result.get("reasons", []),
+        "issue_labels": result.get("issue_labels", []),
+        "threat_summary": result.get("threat_summary"),
+        "threat_family": result.get("threat_family"),
+        "threat_type": result.get("threat_type"),
+        "threat_label_source": result.get("threat_label_source"),
+        "threat_details": result.get("threat_details", []),
+        "risk_band": result.get("risk_band"),
+        "static_prob_components": result.get("static_prob_components", []),
+        "component_models_used": result.get("component_models_used", []),
+        "component_model_count": result.get("component_model_count", 0),
         "scanner_stage": result.get("scanner_stage"),
         "scanner_warning": result.get("scanner_warning"),
         "model_path": result.get("model_path", str(MODEL_PATH)),
@@ -438,6 +710,10 @@ def scan_file(
 def ml_stack_status() -> dict[str, Any]:
     model_path, norm_path = _resolve_model_paths()
     status: dict[str, Any] = {
+        "model_name": MODEL_DISPLAY_NAME,
+        "architecture_name": MODEL_ARCHITECTURE_NAME,
+        "model_artifact_name": "ember+sorel ensemble",
+        "normalization_artifact_name": "ember+sorel normalization",
         "model_path": str(model_path),
         "norm_path": str(norm_path),
         "model_exists": model_path.exists(),
@@ -446,35 +722,79 @@ def ml_stack_status() -> dict[str, Any]:
         "ember": False,
         "lief": False,
         "ready": False,
+        "ensemble_ready": False,
+        "degraded": False,
         "errors": [],
         "checkpoint_layout": None,
+        "component_models": [],
     }
 
+    for spec in MODEL_SPECS:
+        status["component_models"].append(
+            {
+                "key": spec["key"],
+                "label": spec["label"],
+                "model_artifact_name": spec["model_path"].name,
+                "normalization_artifact_name": spec["norm_path"].name,
+                "model_path": str(spec["model_path"]),
+                "norm_path": str(spec["norm_path"]),
+                "model_exists": Path(spec["model_path"]).exists(),
+                "norm_exists": Path(spec["norm_path"]).exists(),
+                "weight": float(spec["weight"]),
+            }
+        )
+
     try:
-        import torch  # noqa: F401
+        import torch
         status["torch"] = True
     except Exception as exc:
         status["errors"].append(f"torch: {exc}")
 
     try:
-        bundle = _load_model_bundle(str(model_path), str(norm_path))
+        _init_ember_raw_extractor()
         status["ember"] = True
-        status["torch"] = True
-        status["lief"] = True
-        status["checkpoint_layout"] = bundle["checkpoint_layout"]
     except Exception as exc:
-        if isinstance(exc, ScannerStageError):
-            status["errors"].append(f"{exc.stage}: {exc}")
-        else:
-            status["errors"].append(f"load_bundle: {exc}")
+        status["errors"].append(f"ember: {exc}")
+
+    try:
+        import lief  # noqa: F401
+        status["lief"] = True
+    except Exception as exc:
+        status["errors"].append(f"lief: {exc}")
+
+    if status["torch"]:
+        device = torch.device("cpu")
+        for item, spec in zip(status["component_models"], MODEL_SPECS):
+            try:
+                checkpoint = _load_checkpoint(Path(spec["model_path"]), device, torch)
+                state_dict = _extract_state_dict(checkpoint)
+                item["checkpoint_layout_ok"] = _state_dict_matches_layout(spec, state_dict)
+            except Exception as exc:
+                item["checkpoint_layout_ok"] = False
+                item["checkpoint_error"] = str(exc)
+    else:
+        for item in status["component_models"]:
+            item["checkpoint_layout_ok"] = False
+
+    available_components = [
+        item
+        for item in status["component_models"]
+        if item["model_exists"] and item["norm_exists"] and item.get("checkpoint_layout_ok")
+    ]
 
     status["ready"] = bool(
-        status["model_exists"]
-        and status["norm_exists"]
+        available_components
         and status["torch"]
         and status["ember"]
         and status["lief"]
     )
+    status["ensemble_ready"] = bool(
+        len(available_components) == len(MODEL_SPECS)
+        and status["torch"]
+        and status["ember"]
+        and status["lief"]
+    )
+    status["degraded"] = bool(status["ready"] and not status["ensemble_ready"])
     return status
 
 

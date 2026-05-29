@@ -6,6 +6,7 @@ const FOLLOW_UP_ACTIONS = new Set(['approved_via_result_page', 'rejected_via_res
 
 function statusClass(status) {
   if (status === 'Malicious') return 'tag bad';
+  if (status === 'Review') return 'tag warn';
   if (status === 'Suspicious') return 'tag warn';
   return 'tag ok';
 }
@@ -26,13 +27,16 @@ function resultText(entry) {
   const warning = String(entry?.scanner_warning || '');
   const risk = typeof entry?.fused_risk === 'number' ? entry.fused_risk : null;
   const stegoThreshold = typeof entry?.stego_threshold === 'number' ? entry.stego_threshold : 0.7;
+  const unsafeThreshold = typeof entry?.unsafe_threshold === 'number' ? entry.unsafe_threshold : 0.8;
   const reasons = Array.isArray(entry?.reasons) ? entry.reasons.map((reason) => String(reason).toLowerCase()) : [];
 
-  if (prediction === 'stego') return 'Suspicious';
-  if (risk !== null && risk >= stegoThreshold) return 'Suspicious';
+  if (risk !== null && risk >= unsafeThreshold) return 'Suspicious';
+  if (prediction === 'stego') return 'Review';
+  if (risk !== null && risk >= stegoThreshold) return 'Review';
   if (isImage && engine && engine !== 'stg-ml') return 'Suspicious';
   if (decision === 'BLOCKED') return 'Malicious';
-  if (decision === 'STEGO') return 'Suspicious';
+  if (['STEGO', 'UNCERTAIN'].includes(decision)) return 'Review';
+  if (['PENDING', 'IGNORED'].includes(decision)) return 'Suspicious';
   if (warning || (engine === 'heuristic' && reasons.some((reason) => reason.includes('could not inspect')))) {
     return 'Suspicious';
   }
@@ -64,9 +68,10 @@ function safetyScore(entry, status) {
 
   const rawSafety = 1 - risk;
   let score = Math.max(0, Math.min(100, Math.round(rawSafety * 100)));
+  if (status === 'Review') score = Math.min(score, 79);
   if (status === 'Suspicious') score = Math.min(score, 69);
   if (status === 'Malicious') score = Math.min(score, 30);
-  return `${score} / 100`;
+  return `${score}/100`;
 }
 
 function deviceLabel(entry) {
@@ -116,8 +121,16 @@ export default function LogsPage({ currentUser }) {
       <p className="page-help">This is {currentUser?.name}'s scan history. Newest scan appears at the top.</p>
       {message && <p className="scan-message">{message}</p>}
 
-      <div className="card table-wrap">
-        <table>
+      <div className="card table-wrap logs-table-wrap">
+        <table className="logs-table">
+          <colgroup>
+            <col className="logs-col-file" />
+            <col className="logs-col-status" />
+            <col className="logs-col-score" />
+            <col className="logs-col-device" />
+            <col className="logs-col-engine" />
+            <col className="logs-col-date" />
+          </colgroup>
           <thead>
             <tr>
               <th>File Name</th>
@@ -138,12 +151,14 @@ export default function LogsPage({ currentUser }) {
                 const status = resultText(entry);
                 return (
                   <tr key={`${entry.ts || 'na'}-${entry.file_name || 'file'}-${idx}`}>
-                    <td>{entry.file_name || '-'}</td>
-                    <td><span className={statusClass(status)}>{status}</span></td>
-                    <td>{safetyScore(entry, status)}</td>
-                    <td>{deviceLabel(entry)}</td>
-                    <td>{entry.engine || '-'}</td>
-                    <td>{formatDate(entry.ts)}</td>
+                    <td className="logs-file-name" title={entry.file_name || '-'}>
+                      {entry.file_name || '-'}
+                    </td>
+                    <td className="logs-status-cell"><span className={statusClass(status)}>{status}</span></td>
+                    <td className="logs-score-cell">{safetyScore(entry, status)}</td>
+                    <td className="logs-device-cell">{deviceLabel(entry)}</td>
+                    <td className="logs-engine-cell">{entry.engine || '-'}</td>
+                    <td className="logs-date-cell">{formatDate(entry.ts)}</td>
                   </tr>
                 );
               })

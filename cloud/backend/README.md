@@ -37,6 +37,7 @@ Use `127.0.0.1` instead of `0.0.0.0` if frontend and backend are on the same lap
 - `GET /api/scan/latest`
 - `GET /api/scan/logs`
 - `GET /api/scan/results/{file_name}`
+- `GET /api/scan/reports/{report_id}/scan_report.html`
 - `GET /api/scan/files/{file_name}`
 - `DELETE /api/scan/files/{file_name}`
 
@@ -59,7 +60,11 @@ VITE_BACKEND_URL=http://BACKEND_LAPTOP_IP:8000
 ## Scanner Notes
 
 - Upload triggers backend scanning and stores a result payload in memory.
-- `POST /api/scan/upload` returns a `processing` result immediately while scanning runs in the background.
+- Image scans also create a cleaned PNG with metadata stripped, the image re-encoded, and
+  RGB least-significant bits cleared to remove common embedded payloads. The hidden-message
+  decoder still runs, but decoded data is secondary and shown only when requested. Reports are saved under
+  `cloud/backend/app/reports/stego_decoder` and exposed through the report endpoint above.
+- `POST /api/scan/upload` returns a queued/processing result immediately while scanning runs in the background.
 - The frontend polls `GET /api/scan/results/{file_name}` and `GET /api/scan/latest`.
 - If ML dependencies (`torch`, `ember`) are unavailable, scanner falls back to a heuristic engine and returns a warning in `scan_result.scanner_warning`.
 

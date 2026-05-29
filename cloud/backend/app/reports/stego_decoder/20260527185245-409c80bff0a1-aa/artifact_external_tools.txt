@@ -1,0 +1,9 @@
+phasm: C:\Users\JOSEPH\.cargo\bin\phasm.EXE
+phasm-cli: not found
+exiftool: not found
+binwalk: not found
+steghide: not found
+zsteg: not found
+outguess: not found
+foremost: not found
+strings: C:\MinGW\bin\strings.EXE

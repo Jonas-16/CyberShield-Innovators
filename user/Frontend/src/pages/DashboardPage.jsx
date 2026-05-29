@@ -79,9 +79,9 @@ export default function DashboardPage({ currentUser }) {
       <div className="dashboard-hero card">
         <div>
           <p className="hero-kicker">Cyber Shield Innovators</p>
-          <h2>User-to-cloud file scanning</h2>
+          <h2>About this app</h2>
           <p className="page-help">
-            {currentUser?.name}'s laptop runs this UI. Files are uploaded to the backend scanner, which can run on another demo laptop now and a cloud server later.
+            It helps keep your device safe by checking files and apps for hidden dangers before you open them. It can detect harmful content that normal antivirus software may miss, including threats hidden inside photos, videos, and other files. The app is designed to make online safety simple and secure for everyone.
           </p>
         </div>
         <div className="hero-pill-stack">
@@ -118,12 +118,14 @@ export default function DashboardPage({ currentUser }) {
         </article>
 
         <article className="card">
-          <h3>Demo Flow</h3>
+          <h3>Application Flow</h3>
           <ul className="bullet-list">
-            <li>User chooses a file in the frontend</li>
-            <li>Frontend uploads it to the backend API</li>
-            <li>Backend stores and scans the file</li>
-            <li>Frontend shows the returned safety result</li>
+            <li>User uploads or downloads a file</li>
+            <li>The app safely checks the file before opening it</li>
+            <li>Images, videos, and apps are scanned for hidden threats</li>
+            <li>The app decides if the file is safe or dangerous</li>
+            <li>If a threat is found, the user gets an alert</li>
+            <li>Harmful files are blocked or removed to keep the device safe</li>
           </ul>
         </article>
       </div>

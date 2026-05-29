@@ -11,6 +11,7 @@ const TERMINAL_POST_ACTIONS = new Set(['approved_via_result_page', 'rejected_via
 function resultClass(result) {
   if (result === 'No file selected') return 'overall warn';
   if (result === 'Malicious') return 'overall bad';
+  if (result === 'Review') return 'overall warn';
   if (result === 'Suspicious') return 'overall warn';
   return 'overall safe';
 }
@@ -119,7 +120,7 @@ function isTerminalPayload(payload) {
 }
 
 function isDirectBackendUpload(payload) {
-  return payload?.source === 'manual-upload' || payload?.source === 'cloud-upload';
+  return ['manual-upload', 'cloud-upload', 'cloud-sandbox-upload'].includes(payload?.source);
 }
 
 function isPendingPayload(payload) {
@@ -135,13 +136,16 @@ function getResultText(scan, fallbackResult) {
   const warning = String(scan?.scanner_warning || '');
   const risk = typeof scan?.fused_risk === 'number' ? scan.fused_risk : null;
   const stegoThreshold = typeof scan?.stego_threshold === 'number' ? scan.stego_threshold : 0.7;
+  const unsafeThreshold = typeof scan?.unsafe_threshold === 'number' ? scan.unsafe_threshold : 0.8;
   const reasons = Array.isArray(scan?.reasons) ? scan.reasons.map((reason) => String(reason).toLowerCase()) : [];
 
-  if (prediction === 'stego') return 'Suspicious';
-  if (risk !== null && risk >= stegoThreshold) return 'Suspicious';
+  if (risk !== null && risk >= unsafeThreshold) return 'Suspicious';
+  if (prediction === 'stego') return 'Review';
+  if (risk !== null && risk >= stegoThreshold) return 'Review';
   if (isImage && engine && engine !== 'stg-ml') return 'Suspicious';
   if (decision === 'BLOCKED') return 'Malicious';
-  if (decision === 'STEGO') return 'Suspicious';
+  if (['STEGO', 'UNCERTAIN'].includes(decision)) return 'Review';
+  if (['PENDING', 'IGNORED'].includes(decision)) return 'Suspicious';
   if (warning || (engine === 'heuristic' && reasons.some((reason) => reason.includes('could not inspect')))) {
     return 'Suspicious';
   }
@@ -152,8 +156,10 @@ function getDecisionLabel(scan, result) {
   if (!scan) return '-';
   const decision = String(scan?.decision || '').toUpperCase();
   if (result === 'Suspicious' && decision === 'ALLOWED') return 'Suspicious';
+  if (result === 'Review') return 'Review';
   if (decision === 'ALLOWED') return 'Safe';
   if (decision === 'BLOCKED') return 'Malicious';
+  if (decision === 'UNCERTAIN') return 'Suspicious';
   return decision || '-';
 }
 
@@ -164,6 +170,7 @@ function computeSafetyScore(scan, result) {
 
   const rawSafety = 1 - risk;
   let score = Math.max(0, Math.min(100, Math.round(rawSafety * 100)));
+  if (result === 'Review') score = Math.min(score, 79);
   if (result === 'Suspicious') score = Math.min(score, 69);
   if (result === 'Malicious') score = Math.min(score, 30);
   return score;
@@ -173,6 +180,19 @@ function formatRiskPercent(risk) {
   if (typeof risk !== 'number') return 'N/A';
   const riskPercent = Math.max(0, Math.min(100, risk * 100));
   return `${riskPercent.toFixed(2)}%`;
+}
+
+function absoluteReportUrl(url) {
+  if (!url) return '';
+  if (url.startsWith('http://') || url.startsWith('https://')) return url;
+  return `${API_BASE_URL}${url}`;
+}
+
+function downloadUrl(url) {
+  const absolute = absoluteReportUrl(url);
+  if (!absolute) return '';
+  const separator = absolute.includes('?') ? '&' : '?';
+  return `${absolute}${separator}download=true`;
 }
 
 export default function ResultPage({ overallResult, currentUser }) {
@@ -210,7 +230,7 @@ export default function ResultPage({ overallResult, currentUser }) {
           return;
         }
         setFileInfo(buildLatestPayload(payload));
-        setIsManualUpload(false);
+        setIsManualUpload(isDirectBackendUpload(payload));
         setMessage(payload.message || '');
       } catch (_) {
         // ignore latest-result failures on initial render
@@ -243,7 +263,7 @@ export default function ResultPage({ overallResult, currentUser }) {
         }
 
         setFileInfo(buildLatestPayload(payload));
-        setIsManualUpload(false);
+        setIsManualUpload(isDirectBackendUpload(payload));
         setMessage(payload.message || '');
       } catch (_) {
         // ignore polling failures and keep current UI state
@@ -355,21 +375,23 @@ export default function ResultPage({ overallResult, currentUser }) {
   const warningText = scan?.scanner_warning
     ? 'ML engine is unavailable; running heuristic fallback mode.'
     : '';
+  const decoder = scan?.stego_decoder || null;
+  const decoderReportUrl = absoluteReportUrl(decoder?.report_url || scan?.decoder_report_url);
+  const cleanImageUrl = absoluteReportUrl(decoder?.sanitized_image?.url || scan?.sanitized_image_url);
+  const cleanImageDownloadUrl = downloadUrl(decoder?.sanitized_image?.url || scan?.sanitized_image_url);
   const isActiveSandboxReview = Boolean(
     hasFile &&
-    !isManualUpload &&
     postAction === 'manual_review_required'
   );
-  const showSaveButton = hasFile && !isProcessing && !isTerminalResult && !isManualUpload && postAction !== 'auto_saved_safe' && postAction !== 'auto_deleted_blocked';
   const isAutoRestored = watcherFile?.status === 'restored' && watcherFile?.restored_reason === 'safe_scan_result';
   const restoredPath = watcherFile?.original_path || '';
   const savedNotice = isAutoRestored
     ? `Safe file automatically saved to ${restoredPath}.`
     : '';
-  const shouldShowSaveButton = showSaveButton && !isAutoRestored;
-  const showDeleteButton = hasFile && !isProcessing && !isTerminalResult && !isAutoRestored && ((!isManualUpload && postAction !== 'auto_saved_safe' && postAction !== 'auto_deleted_blocked') || (isManualUpload && !postAction));
-  const showClearButton = hasFile;
-  const canDelete = showDeleteButton;
+  const isReviewResult = resultText === 'Review';
+  const showSaveButton = hasFile && !isProcessing && !isTerminalResult && (isReviewResult || isActiveSandboxReview);
+  const showDeleteButton = hasFile && !isProcessing && !isTerminalResult && (isReviewResult || isActiveSandboxReview);
+  const showClearButton = hasFile && !showSaveButton && !showDeleteButton;
 
   const tags = useMemo(() => {
     if (!scan) {
@@ -529,17 +551,29 @@ export default function ResultPage({ overallResult, currentUser }) {
       </div>
 
       <div className="action-row">
-        {shouldShowSaveButton && (
+        {showSaveButton && (
           <button type="button" className="btn" onClick={saveFile} disabled={isBusy || !hasFile}>Save</button>
         )}
         {showClearButton && (
           <button type="button" className="btn" onClick={clearResults} disabled={isBusy}>Clear Results</button>
         )}
         {showDeleteButton && (
-          <button type="button" className="btn danger" onClick={deleteFile} disabled={isBusy || !canDelete}>Delete</button>
+          <button type="button" className="btn danger" onClick={deleteFile} disabled={isBusy || !hasFile}>Delete</button>
         )}
       </div>
       {fileInfo?.file_name && <p className="scan-file">Scanned file: {fileInfo.file_name}</p>}
+      {cleanImageUrl && (
+        <p className="scan-message">
+          Cleaned image ready: <a href={cleanImageDownloadUrl}>Download image with embedded data removed</a>
+        </p>
+      )}
+      {decoder?.skipped && <p className="scan-message">{decoder.reason || 'No decode needed for this file.'}</p>}
+      {decoder?.recommendation && <p className="scan-message">Decoded data available on request: {decoder.recommendation}</p>}
+      {decoderReportUrl && !decoder?.skipped && (
+        <p className="scan-message">
+          <a href={decoderReportUrl} target="_blank" rel="noreferrer">Show decoded data report</a>
+        </p>
+      )}
       {savedNotice && <p className="scan-message">{savedNotice}</p>}
       {message && <p className="scan-message">{message}</p>}
     </section>

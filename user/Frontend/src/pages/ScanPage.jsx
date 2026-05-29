@@ -11,7 +11,7 @@ function isPendingResult(payload) {
 
 function isCloudUpload(payload) {
   if (!payload) return false;
-  return payload?.source === 'cloud-upload';
+  return ['cloud-upload', 'manual-upload', 'cloud-sandbox-upload'].includes(payload?.source);
 }
 
 function getStatusMessage(payload) {
@@ -35,13 +35,16 @@ function formatPercent(value) {
 function resultText(scan, fallbackResult) {
   const risk = typeof scan?.fused_risk === 'number' ? scan.fused_risk : null;
   const stegoThreshold = typeof scan?.stego_threshold === 'number' ? scan.stego_threshold : 0.7;
+  const unsafeThreshold = typeof scan?.unsafe_threshold === 'number' ? scan.unsafe_threshold : 0.8;
   const prediction = String(scan?.predicted_label || '').toLowerCase();
   const decision = String(scan?.decision || '').toUpperCase();
 
   if (decision === 'BLOCKED') return 'Malicious';
-  if (risk !== null && risk >= stegoThreshold) return 'Suspicious';
-  if (prediction === 'stego') return 'Suspicious';
-  if (decision === 'STEGO') return 'Suspicious';
+  if (risk !== null && risk >= unsafeThreshold) return 'Suspicious';
+  if (risk !== null && risk >= stegoThreshold) return 'Review';
+  if (prediction === 'stego') return 'Review';
+  if (['STEGO', 'UNCERTAIN'].includes(decision)) return 'Review';
+  if (['PENDING', 'IGNORED'].includes(decision)) return 'Suspicious';
   if (prediction === 'cover' || decision === 'ALLOWED' || decision === 'COVER') return 'Safe';
   return fallbackResult || '-';
 }
@@ -52,9 +55,23 @@ function formatSafetyScore(scan, status) {
 
   const rawSafety = 1 - risk;
   let score = Math.max(0, Math.min(100, Math.round(rawSafety * 100)));
+  if (status === 'Review') score = Math.min(score, 79);
   if (status === 'Suspicious') score = Math.min(score, 69);
   if (status === 'Malicious') score = Math.min(score, 30);
   return `${score} / 100`;
+}
+
+function absoluteReportUrl(url) {
+  if (!url) return '';
+  if (url.startsWith('http://') || url.startsWith('https://')) return url;
+  return `${API_BASE_URL}${url}`;
+}
+
+function downloadUrl(url) {
+  const absolute = absoluteReportUrl(url);
+  if (!absolute) return '';
+  const separator = absolute.includes('?') ? '&' : '?';
+  return `${absolute}${separator}download=true`;
 }
 
 function buildDetailRows(result) {
@@ -63,6 +80,7 @@ function buildDetailRows(result) {
 
   const reasons = Array.isArray(scan?.reasons) ? scan.reasons.filter(Boolean).join(', ') : '';
   const status = resultText(scan, result?.overall_result);
+  const decoder = scan?.stego_decoder || null;
   return [
     { label: 'Overall Result', value: status },
     { label: 'Safety Score', value: formatSafetyScore(scan, status) },
@@ -74,6 +92,9 @@ function buildDetailRows(result) {
     { label: 'Stego Probability', value: formatPercent(scan?.stego_prob) },
     { label: 'Cover Probability', value: formatPercent(scan?.cover_prob) },
     { label: 'Scanner Stage', value: scan?.scanner_stage || '-' },
+    { label: 'Decoder Status', value: decoder?.skipped ? (decoder.reason || 'No decode needed for this file.') : '-' },
+    { label: 'Readable Hidden Message', value: decoder ? (decoder.readable_message_found ? 'Yes' : 'No') : '-' },
+    { label: 'Decoder Candidates', value: decoder ? String(decoder.candidate_count ?? 0) : '-' },
     { label: 'Reasons', value: reasons || '-' },
   ].filter((item) => item.value !== '-');
 }
@@ -183,6 +204,9 @@ export default function ScanPage({ currentUser }) {
   const scanDetails = useMemo(() => {
     return buildDetailRows(result);
   }, [result]);
+  const decoderReportUrl = absoluteReportUrl(result?.scan_result?.stego_decoder?.report_url);
+  const cleanImageUrl = absoluteReportUrl(result?.scan_result?.stego_decoder?.sanitized_image?.url);
+  const cleanImageDownloadUrl = downloadUrl(result?.scan_result?.stego_decoder?.sanitized_image?.url);
 
   const handleFileChange = async (event) => {
     const file = event.target.files?.[0];
@@ -228,15 +252,8 @@ export default function ScanPage({ currentUser }) {
     <section className="page">
       <h2>Scan Page</h2>
       <p className="page-help">
-        Select a file on {currentUser?.name}'s laptop. The UI uploads it to the backend scanner and shows the result here.
+        Select a file on {currentUser?.name}'s laptop. The app will scan the file and show the result here.
       </p>
-
-      <div className="card scan-config-card">
-        <h3>Backend Connection</h3>
-        <p className="muted-text">
-          Current API: <strong>{API_BASE_URL}</strong>. For the demo laptop setup, point VITE_BACKEND_URL to the backend laptop IP.
-        </p>
-      </div>
 
       <div className="card upload-card">
         <h3>Manual File Check</h3>
@@ -248,6 +265,16 @@ export default function ScanPage({ currentUser }) {
         {selectedFile && <p className="scan-file">Selected: {selectedFile.name}</p>}
         {message && <p className="scan-message">{message}</p>}
         {result?.staging_path && <p className="scan-meta">Backend file path: {result.staging_path}</p>}
+        {cleanImageUrl && (
+          <p className="scan-message">
+            Cleaned image ready: <a href={cleanImageDownloadUrl}>Download image with embedded data removed</a>
+          </p>
+        )}
+        {decoderReportUrl && (
+          <p className="scan-message">
+            <a href={decoderReportUrl} target="_blank" rel="noreferrer">Show decoded data report</a>
+          </p>
+        )}
         {scanDetails.length > 0 && (
           <div className="scan-detail-list">
             {scanDetails.map((detail) => (

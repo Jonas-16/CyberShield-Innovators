@@ -19,6 +19,7 @@ torch==2.5.1
 torchvision==0.20.1
 
 # Image scanner dependencies
+Pillow>=10.4.0
 albumentations>=2.0.8
 efficientnet-pytorch>=0.7.1
 

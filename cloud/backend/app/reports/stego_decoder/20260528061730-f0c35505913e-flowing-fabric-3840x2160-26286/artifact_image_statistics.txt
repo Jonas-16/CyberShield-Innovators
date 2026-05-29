@@ -1,0 +1,30 @@
+Image size: 3840 x 2160
+Mode: RGB
+
+Channel r entropy: 5.471 bits
+  bit 0: ones=0.286, transitions=0.279
+  bit 1: ones=0.284, transitions=0.270
+  bit 2: ones=0.283, transitions=0.255
+  bit 3: ones=0.283, transitions=0.233
+  bit 4: ones=0.267, transitions=0.187
+  bit 5: ones=0.318, transitions=0.109
+  bit 6: ones=0.276, transitions=0.049
+  bit 7: ones=0.329, transitions=0.020
+Channel g entropy: 5.302 bits
+  bit 0: ones=0.283, transitions=0.278
+  bit 1: ones=0.281, transitions=0.269
+  bit 2: ones=0.277, transitions=0.253
+  bit 3: ones=0.275, transitions=0.229
+  bit 4: ones=0.265, transitions=0.181
+  bit 5: ones=0.271, transitions=0.103
+  bit 6: ones=0.189, transitions=0.045
+  bit 7: ones=0.204, transitions=0.014
+Channel b entropy: 4.769 bits
+  bit 0: ones=0.261, transitions=0.271
+  bit 1: ones=0.258, transitions=0.264
+  bit 2: ones=0.249, transitions=0.248
+  bit 3: ones=0.230, transitions=0.214
+  bit 4: ones=0.196, transitions=0.140
+  bit 5: ones=0.183, transitions=0.067
+  bit 6: ones=0.140, transitions=0.030
+  bit 7: ones=0.125, transitions=0.012

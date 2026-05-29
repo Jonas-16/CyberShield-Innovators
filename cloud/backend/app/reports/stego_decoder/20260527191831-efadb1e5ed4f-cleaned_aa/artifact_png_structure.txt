@@ -1,0 +1,4 @@
+PNG chunks:
+  offset=8 type=IHDR length=13
+  offset=33 type=IDAT length=26583
+  offset=26628 type=IEND length=0

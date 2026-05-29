@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import hashlib
+import queue
 import shutil
 import secrets
 import subprocess
@@ -40,7 +41,12 @@ SANDBOX_APPROVE_MARKER = ".approved"
 SANDBOX_REJECT_MARKER = ".rejected"
 MAX_FILE_SIZE_BYTES = 1024 * 1024 * 1024  # 1 GB
 SCAN_RESULTS: dict[str, dict[str, Any]] = {}
+DECODER_REPORT_ROOT = Path(__file__).resolve().parent / "reports" / "stego_decoder"
 APP_STARTED_AT = datetime.now(timezone.utc)
+SCAN_JOB_QUEUE: queue.Queue[dict[str, Any]] = queue.Queue()
+SCAN_WORKER_STARTED = False
+SCAN_WORKER_LOCK = threading.Lock()
+SCAN_ACTION_CONDITION = threading.Condition()
 SESSION_APPROVE_MARKER = ".approved"
 SESSION_REJECT_MARKER = ".rejected"
 TERMINAL_POST_ACTIONS = {"approved_via_result_page", "rejected_via_result_page", "deleted"}
@@ -195,15 +201,23 @@ def overall_result_for(payload: dict[str, Any] | None) -> str:
     fused_risk = data.get("fused_risk")
     stego_threshold = data.get("stego_threshold")
     stego_threshold = stego_threshold if isinstance(stego_threshold, (int, float)) else 0.70
+    review_threshold = float(data.get("review_threshold") or stego_threshold)
+    unsafe_threshold = float(data.get("unsafe_threshold") or 0.80)
     reasons = [str(reason).lower() for reason in data.get("reasons", []) if reason]
 
     if decision == "BLOCKED":
         return "Malicious"
-    if isinstance(fused_risk, (int, float)) and fused_risk >= stego_threshold:
+    if isinstance(fused_risk, (int, float)) and fused_risk >= unsafe_threshold:
         return "Suspicious"
+    if isinstance(fused_risk, (int, float)) and fused_risk >= review_threshold:
+        return "Review"
+    if predicted_label == "stego" and isinstance(fused_risk, (int, float)) and fused_risk < unsafe_threshold:
+        return "Review"
     if predicted_label == "stego":
         return "Suspicious"
-    if decision in {"STEGO", "PENDING", "IGNORED"}:
+    if decision in {"STEGO", "UNCERTAIN"}:
+        return "Review"
+    if decision in {"PENDING", "IGNORED"}:
         return "Suspicious"
     if predicted_label == "cover":
         return "Safe"
@@ -211,7 +225,7 @@ def overall_result_for(payload: dict[str, Any] | None) -> str:
         return "Suspicious"
     if scanner_warning or (engine == "heuristic" and any("could not inspect" in reason for reason in reasons)):
         return "Suspicious"
-    if explicit in {"Safe", "Suspicious", "Malicious"}:
+    if explicit in {"Safe", "Review", "Suspicious", "Malicious"}:
         return explicit
     return "Safe"
 
@@ -347,10 +361,7 @@ def process_staged_file(target_path: Path, user_id: str | None = None, device: d
         scan_result["source"] = "cloud-sandbox-upload"
         scan_result["user_id"] = owner_id
         scan_result["sandbox_session_id"] = str(session["id"])
-        scan_result["post_action"] = "manual_review_required"
-        scan_result["message"] = "File was moved into a Windows Sandbox session and scanned from the sandbox input folder."
         scan_result.update(device)
-        write_scan_event(scan_result)
     except Exception as exc:
         session_id = str(session["id"]) if session else None
         scan_result = {
@@ -366,6 +377,33 @@ def process_staged_file(target_path: Path, user_id: str | None = None, device: d
         }
 
     overall_result = overall_result_for(scan_result)
+    if session:
+        if overall_result == "Safe":
+            scan_result["post_action"] = "auto_saved_safe"
+            scan_result["message"] = "Safe file was approved automatically. Monitored downloads will be restored by the watcher."
+            try:
+                Path(session["approve_marker"]).write_text("approved\n", encoding="utf-8")
+            except Exception as exc:
+                scan_result["post_action_warning"] = str(exc)
+        elif overall_result == "Review":
+            scan_result["post_action"] = "manual_review_required"
+            scan_result["message"] = "Borderline scan result. Review the file and choose whether to save or delete it."
+        else:
+            scan_result["post_action"] = "auto_deleted_blocked"
+            scan_result["message"] = "Suspicious or malicious file was deleted automatically."
+            try:
+                if scan_target.exists():
+                    scan_target.unlink()
+                Path(session["reject_marker"]).write_text("rejected\n", encoding="utf-8")
+            except Exception as exc:
+                scan_result["post_action_warning"] = str(exc)
+    else:
+        scan_result["post_action"] = "manual_review_required" if overall_result == "Review" else ("auto_deleted_blocked" if overall_result != "Safe" else "auto_saved_safe")
+        scan_result["message"] = "Scan completed and automatic file handling was applied."
+
+    scan_result["overall_result"] = overall_result
+    write_scan_event(scan_result)
+
     payload = {
         "status": "completed",
         "file_name": scan_target.name,
@@ -375,11 +413,102 @@ def process_staged_file(target_path: Path, user_id: str | None = None, device: d
         "overall_result": overall_result,
         "source": "cloud-sandbox-upload",
         "user_id": owner_id,
+        "post_action": scan_result.get("post_action"),
         **device,
         "ts": str(scan_result.get("ts") or datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")),
     }
     SCAN_RESULTS[result_key(owner_id, scan_target.name)] = payload
     return payload
+
+
+def failed_scan_payload(
+    target_path: Path,
+    size_bytes: int,
+    owner_id: str,
+    device: dict[str, str],
+    error: Exception,
+) -> dict[str, Any]:
+    return {
+        "status": "failed",
+        "file_name": target_path.name,
+        "staging_path": str(target_path),
+        "size_bytes": size_bytes,
+        "scan_result": {
+            "decision": "UNCERTAIN",
+            "engine": "none",
+            "fused_risk": 0.5,
+            "reasons": [],
+            "scanner_warning": str(error),
+        },
+        "overall_result": "Suspicious",
+        "source": "cloud-sandbox-upload",
+        "user_id": owner_id,
+        **device,
+        "message": "The queued scan failed before it could complete.",
+        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+    }
+
+
+def notify_scan_action() -> None:
+    with SCAN_ACTION_CONDITION:
+        SCAN_ACTION_CONDITION.notify_all()
+
+
+def wait_for_scan_action(file_name: str, owner_id: str) -> None:
+    key = result_key(owner_id, file_name)
+    while True:
+        record = SCAN_RESULTS.get(key)
+        if not record:
+            return
+        if str(record.get("post_action", "")) in TERMINAL_POST_ACTIONS:
+            return
+        with SCAN_ACTION_CONDITION:
+            SCAN_ACTION_CONDITION.wait(timeout=1.0)
+
+
+def scan_job_worker_loop() -> None:
+    while True:
+        job = SCAN_JOB_QUEUE.get()
+        target_path = job["target_path"]
+        size_bytes = job["size_bytes"]
+        owner_id = job["owner_id"]
+        device = job["device"]
+        try:
+            queued_payload = SCAN_RESULTS.get(result_key(owner_id, target_path.name), {})
+            SCAN_RESULTS[result_key(owner_id, target_path.name)] = {
+                **queued_payload,
+                "status": "processing",
+                "message": "Scan is running. Windows Sandbox is starting and the sandbox copy is being scanned.",
+                "ts": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+            }
+            result = process_staged_file(target_path, owner_id, device)
+            if str(result.get("post_action", "")) == "manual_review_required":
+                SCAN_RESULTS[result_key(owner_id, result["file_name"])] = {
+                    **result,
+                    "status": "completed",
+                    "message": "Scan complete. Waiting for this file to be approved/saved or rejected/deleted before starting the next queued file.",
+                }
+                wait_for_scan_action(str(result["file_name"]), owner_id)
+        except Exception as exc:
+            SCAN_RESULTS[result_key(owner_id, target_path.name)] = failed_scan_payload(
+                target_path,
+                size_bytes,
+                owner_id,
+                device,
+                exc,
+            )
+        finally:
+            SCAN_JOB_QUEUE.task_done()
+
+
+def start_scan_worker_once() -> None:
+    global SCAN_WORKER_STARTED
+    with SCAN_WORKER_LOCK:
+        if SCAN_WORKER_STARTED:
+            return
+        thread = threading.Thread(target=scan_job_worker_loop, name="cloud-scan-worker", daemon=True)
+        thread.start()
+        SCAN_WORKER_STARTED = True
 
 
 def start_background_scan(
@@ -392,7 +521,7 @@ def start_background_scan(
     device = device or device_metadata()
     submitted_at = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
     payload = {
-        "status": "processing",
+        "status": "queued",
         "file_name": target_path.name,
         "staging_path": str(target_path),
         "size_bytes": size_bytes,
@@ -401,35 +530,20 @@ def start_background_scan(
         "source": "cloud-sandbox-upload",
         "user_id": owner_id,
         **device,
-        "message": "Upload received by backend. Windows Sandbox is starting and the sandbox copy is being scanned.",
+        "message": "Upload received by backend. Scan queued and will run after earlier files finish.",
         "ts": submitted_at,
     }
     SCAN_RESULTS[result_key(owner_id, target_path.name)] = payload
-
-    def _worker() -> None:
-        try:
-            process_staged_file(target_path, owner_id, device)
-        except Exception as exc:
-            SCAN_RESULTS[result_key(owner_id, target_path.name)] = {
-                "status": "failed",
-                "file_name": target_path.name,
-                "staging_path": str(target_path),
-                "size_bytes": size_bytes,
-                "scan_result": {
-                    "decision": "UNCERTAIN",
-                    "engine": "none",
-                    "fused_risk": 0.5,
-                    "reasons": [],
-                    "scanner_warning": str(exc),
-                },
-                "overall_result": "Suspicious",
-                "source": "cloud-sandbox-upload",
-                "user_id": owner_id,
-                **device,
-                "ts": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
-            }
-
-    threading.Thread(target=_worker, name=f"cloud-scan-{target_path.name}", daemon=True).start()
+    start_scan_worker_once()
+    SCAN_JOB_QUEUE.put(
+        {
+            "target_path": target_path,
+            "size_bytes": size_bytes,
+            "owner_id": owner_id,
+            "device": device,
+            "submitted_at": submitted_at,
+        }
+    )
     return payload
 
 
@@ -591,6 +705,29 @@ def resolve_session_dir(file_path: Path | None) -> Path | None:
     return None
 
 
+def resolve_decoder_report_asset(report_id: str, asset_name: str) -> Path:
+    safe_report_id = Path(report_id).name
+    if not safe_report_id or safe_report_id != report_id:
+        raise HTTPException(status_code=400, detail="Invalid report id")
+
+    report_dir = (DECODER_REPORT_ROOT / safe_report_id).resolve()
+    root = DECODER_REPORT_ROOT.resolve()
+    try:
+        report_dir.relative_to(root)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid report id")
+
+    asset_path = (report_dir / asset_name).resolve()
+    try:
+        asset_path.relative_to(report_dir)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid report asset")
+
+    if not asset_path.exists() or not asset_path.is_file():
+        raise HTTPException(status_code=404, detail="Report asset not found")
+    return asset_path
+
+
 def resolve_logged_session_dir(file_name: str, user_id: str | None = None) -> Path | None:
     logged_event = find_logged_event(file_name, user_id=user_id)
     logged_path = logged_event.get("path") if logged_event else None
@@ -610,11 +747,13 @@ def log_follow_up_event(file_name: str, action: str, message: str, user_id: str 
     payload["user_id"] = normalize_user_id(user_id or payload.get("user_id"))
     payload["ts"] = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
     write_scan_event(payload)
+    notify_scan_action()
 
 
 @app.on_event("startup")
 def on_startup() -> None:
     ensure_staging_dir()
+    start_scan_worker_once()
 
 
 @app.get("/api/health")
@@ -793,6 +932,18 @@ def download_file(file_name: str, user_id: str | None = Query(default=None)) -> 
     return FileResponse(path=file_path, filename=file_path.name, media_type="application/octet-stream")
 
 
+@app.get("/api/scan/reports/{report_id}/{asset_name:path}")
+def download_decoder_report_asset(
+    report_id: str,
+    asset_name: str,
+    download: bool = Query(default=False),
+) -> FileResponse:
+    asset_path = resolve_decoder_report_asset(report_id, asset_name or "scan_report.html")
+    if download:
+        return FileResponse(path=asset_path, filename=asset_path.name)
+    return FileResponse(path=asset_path)
+
+
 @app.post("/api/scan/files/{file_name}/approve")
 def approve_file(
     file_name: str,
@@ -827,6 +978,7 @@ def approve_file(
     )
     log_follow_up_event(safe_name, "approved_via_result_page", message, user_id=user_id)
     SCAN_RESULTS.pop(result_key(user_id, safe_name), None)
+    notify_scan_action()
     return {"status": "approved", "file_name": safe_name}
 
 
@@ -853,6 +1005,7 @@ def reject_file(file_name: str, user_id: str | None = Query(default=None)) -> di
 
     log_follow_up_event(safe_name, "rejected_via_result_page", "File was rejected from the Result page and removed from the sandbox.", user_id=user_id)
     SCAN_RESULTS.pop(result_key(user_id, safe_name), None)
+    notify_scan_action()
     return {"status": "rejected", "file_name": safe_name}
 
 
@@ -874,6 +1027,7 @@ def delete_file(
         raise HTTPException(status_code=500, detail=f"Delete failed: {exc}")
 
     SCAN_RESULTS.pop(result_key(user_id, file_path.name), None)
+    notify_scan_action()
     message = (
         "File was deleted from the Result page and the sandbox session was closed."
         if session_dir

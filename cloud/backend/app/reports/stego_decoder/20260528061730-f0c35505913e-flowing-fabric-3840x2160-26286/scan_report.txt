@@ -1,0 +1,39 @@
+Input: C:\Sandbox_VM_Input\sessions\20260528_114605_d5bf1244\in\flowing-fabric-3840x2160-26286.jpg
+Hidden-message candidates: 0
+Metadata strings ignored: 9
+Analysis artifacts: 8
+
+Final status:
+- Readable message found: No
+- Likely encrypted/protected: Yes
+- Tool suspected: Phasm / JPEG stego or clean JPEG
+- Passphrase required: Yes
+- Recommendation: A passphrase is required. Provide --passphrase or try --wordlist with likely passwords.
+
+Assessment:
+- [low] No strong LSB randomness signal: Basic bit-balance checks did not show a strong simple LSB signal.
+- [low] Generated passphrase guesses did not recover message: Tried 30 generated guess(es).
+
+No readable hidden-message candidates found.
+This does not prove the file is clean.
+
+Metadata examples:
+- Adobe Express Photos (Windows)
+- ,com.adobe.carousel.reference_size
+- Copyright (c) 1998 Hewlett-Packard Company
+- .IEC 61966-2.1 Default RGB colour space - sRGB
+- .IEC 61966-2.1 Default RGB colour space - sRGB
+- ,Reference Viewing Condition in IEC61966-2.1
+- ,Reference Viewing Condition in IEC61966-2.1
+- vhttp://ns.adobe.com/xap/1.0/
+- " id="W5M0MpCehiHzreSzNTczkc9d"?> <x:xmpmeta xmlns:x="adobe:ns:meta/" x:xmptk="Adobe XMP Core 7.0-c000 1.000000, 0000/00/00-00:00:00        
+
+Artifacts:
+- artifact_jpeg_structure.txt: analysis 
+- artifact_image_statistics.txt: analysis 
+- artifact_bitplane0_r.png: visual White pixels are LSB=1.
+- artifact_bitplane0_g.png: visual White pixels are LSB=1.
+- artifact_bitplane0_b.png: visual White pixels are LSB=1.
+- artifact_external_tools.txt: analysis 
+- artifact_tool_strings.txt: external 
+- artifact_tool_phasm_guesses.txt: external 

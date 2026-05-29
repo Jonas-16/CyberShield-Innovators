@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Hidden Message Scan Report</title>
+  <style>
+    body { margin: 0; font-family: Segoe UI, Arial, sans-serif; background: #f5f6f8; color: #20242a; }
+    header { background: #1f2937; color: white; padding: 24px 32px; }
+    main { padding: 24px 32px; max-width: 1180px; margin: 0 auto; }
+    h1, h2, h3 { margin-top: 0; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+    .stat, .card, .artifact { background: white; border: 1px solid #d8dde6; border-radius: 8px; padding: 16px; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
+    .pill { display: inline-block; padding: 3px 8px; border-radius: 999px; font-size: 12px; font-weight: 700; text-transform: uppercase; }
+    .high { background: #dcfce7; color: #166534; }
+    .medium, .possible { background: #fef3c7; color: #92400e; }
+    .low, .none { background: #e5e7eb; color: #374151; }
+    pre { white-space: pre-wrap; background: #111827; color: #f9fafb; padding: 12px; border-radius: 6px; max-height: 260px; overflow: auto; }
+    code { background: #eef2f7; padding: 2px 4px; border-radius: 4px; }
+    img { max-width: 100%; image-rendering: pixelated; border: 1px solid #d8dde6; }
+    a { color: #0f5bb5; }
+    li { margin-bottom: 10px; }
+  </style>
+</head>
+<body>
+<header>
+  <h1>Hidden Message Scan Report</h1>
+  <p>C:\Sandbox_VM_Input\sessions\20260528_002142_e3459c0f\in\aa.png</p>
+</header>
+<main>
+  <section class="grid">
+    <div class="stat"><h2>0</h2><p>candidate files</p></div>
+    <div class="stat"><h2>0</h2><p>metadata strings ignored</p></div>
+    <div class="stat"><h2>7</h2><p>analysis artifacts</p></div>
+  </section>
+
+  <h2>Final Status</h2>
+  <section class="card">
+    <p><strong>Readable message found:</strong> No</p>
+    <p><strong>Likely encrypted/protected:</strong> No</p>
+    <p><strong>Tool suspected:</strong> Unknown</p>
+    <p><strong>Passphrase required:</strong> No</p>
+    <p><strong>Recommendation:</strong> No readable message was found with supported no-password methods.</p>
+  </section>
+
+  <h2>Assessment</h2>
+  <ul><li><span class='pill low'>low</span> <strong>No strong LSB randomness signal</strong><br>Basic bit-balance checks did not show a strong simple LSB signal.</li></ul>
+
+  <h2>Candidates</h2>
+  <section class='card'><div class='pill low'>none</div><h3>No readable hidden-message candidates found</h3><p>This does not prove the file is clean. It may use encryption, compression, password protection, or a custom method.</p></section>
+
+  <h2>Visual And Analysis Artifacts</h2>
+  <div class="grid"><section class='artifact'><h3>bitplane0_r</h3><a href='artifact_bitplane0_r.png'><img src='artifact_bitplane0_r.png' alt='bitplane0_r'></a><p>White pixels are LSB=1.</p></section><section class='artifact'><h3>bitplane0_g</h3><a href='artifact_bitplane0_g.png'><img src='artifact_bitplane0_g.png' alt='bitplane0_g'></a><p>White pixels are LSB=1.</p></section><section class='artifact'><h3>bitplane0_b</h3><a href='artifact_bitplane0_b.png'><img src='artifact_bitplane0_b.png' alt='bitplane0_b'></a><p>White pixels are LSB=1.</p></section></div>
+  <ul><li><a href='artifact_png_structure.txt'>png_structure</a> (analysis) </li><li><a href='artifact_image_statistics.txt'>image_statistics</a> (analysis) </li><li><a href='artifact_external_tools.txt'>external_tools</a> (analysis) </li><li><a href='artifact_tool_strings.txt'>tool_strings</a> (external) </li></ul>
+
+  <h2>Metadata Ignored</h2>
+  <ul><li>No metadata strings were filtered.</li></ul>
+</main>
+</body>
+</html>
