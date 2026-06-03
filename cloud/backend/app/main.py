@@ -853,7 +853,7 @@ async def upload_to_sandbox(
             "source": "cloud-sandbox-upload",
             "user_id": owner_id,
             **device,
-            "message": "Unsupported file type. Only image files and .exe files are processed.",
+            "message": "Unsupported file type. Only image files, .exe files, and .apk files are processed.",
             "ts": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
         }
 

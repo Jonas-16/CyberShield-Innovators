@@ -81,12 +81,19 @@ function buildDetailRows(result) {
   const reasons = Array.isArray(scan?.reasons) ? scan.reasons.filter(Boolean).join(', ') : '';
   const status = resultText(scan, result?.overall_result);
   const decoder = scan?.stego_decoder || null;
+  const apkAnalysis = scan?.apk_static_analysis || null;
   return [
     { label: 'Overall Result', value: status },
     { label: 'Safety Score', value: formatSafetyScore(scan, status) },
     { label: 'Decision', value: scan?.decision || '-' },
     { label: 'Engine', value: scan?.engine || '-' },
     { label: 'Risk Score', value: typeof scan?.fused_risk === 'number' ? formatPercent(scan.fused_risk) : '-' },
+    { label: 'APK Malware Probability', value: formatPercent(scan?.apk_malware_prob) },
+    { label: 'APK Benign Probability', value: formatPercent(scan?.apk_benign_prob) },
+    { label: 'APK Structural Risk', value: formatPercent(scan?.apk_structural_risk) },
+    { label: 'APK Evidence Level', value: apkAnalysis?.evidence_level || '-' },
+    { label: 'APK DEX Files', value: apkAnalysis ? String(apkAnalysis.dex_count ?? 0) : '-' },
+    { label: 'APK Certificate Files', value: apkAnalysis ? String(apkAnalysis.certificate_file_count ?? 0) : '-' },
     { label: 'Prediction', value: scan?.predicted_label || '-' },
     { label: 'Confidence', value: formatPercent(scan?.confidence) },
     { label: 'Stego Probability', value: formatPercent(scan?.stego_prob) },

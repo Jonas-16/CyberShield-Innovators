@@ -122,6 +122,126 @@ Whenever a future change is tested and works, add:
 - Result summary
 - Any rollback notes
 
+## Update - 2026-05-30
+
+Working APK scanner state:
+- APK zero-day detection is integrated into the same scan pipeline as `.exe` zero-day and image steganography scanning.
+- `.apk` files are accepted by manual upload and by the user-side folder watcher.
+- The APK model artifact lives at `cloud/backend/app/models/apk_models/apk.pth`.
+- APK scanner status is included in `/api/scan/ml-status` as `apk.ready`.
+- APK result payloads include explicit APK fields:
+  - `apk_malware_prob`
+  - `apk_benign_prob`
+  - `apk_structural_risk`
+  - `apk_raw_combined_risk`
+  - `apk_static_analysis`
+  - `apk_preprocessing_version`
+- Important preprocessing fix: APK byte histogram, byte-entropy histogram, and printable character distribution now use raw counts, not normalized distributions.
+- The verified preprocessing marker is:
+
+```text
+apk_preprocessing_version = ember_raw_counts_v2
+```
+
+Why this mattered:
+- The APK checkpoint was trained on EMBER2024 APK JSONL feature rows.
+- Those rows are expected to contain raw count-style histogram values.
+- The first app-side APK preprocessor normalized several histogram families, which mismatched training preprocessing and produced extreme risk outputs.
+- After switching to raw counts, APK safety scoring became usable again.
+
+APK policy behavior:
+- The neural model remains the primary APK malware detector.
+- A secondary APK structural layer inspects:
+  - readable ZIP/APK structure
+  - `AndroidManifest.xml` presence
+  - signing certificate files under `META-INF`
+  - DEX count
+  - native `.so` library count
+  - high-risk permission strings when visible
+  - suspicious Android strings
+  - third-party APK distribution filename signal
+- Additional non-training APK checks were added:
+  - duplicate ZIP entries
+  - ZIP path traversal entries
+  - encrypted ZIP entries
+  - suspicious embedded file types such as scripts, executables, JAR/class files
+  - high compression-ratio entries
+  - URL/IP indicators, including raw-IP URLs
+  - certificate file SHA-256 fingerprints
+  - APK static evidence level: `low`, `medium`, or `high`
+- Hard `BLOCKED` APK results require both strong model score and structural support.
+- High model score without enough structural support is capped into manual review instead of automatic hard delete.
+
+Files changed for this working state:
+- `cloud/backend/app/scanners/apk/scanner.py`
+  - Added APK ML inference.
+  - Added raw-count APK preprocessing.
+  - Added APK structural analysis.
+  - Added ZIP tamper/anomaly checks, URL/IP extraction, certificate fingerprints, and evidence levels.
+  - Added explicit APK probability/risk fields.
+  - Added `apk_preprocessing_version`.
+- `cloud/backend/app/scanners/apk/model_def.py`
+  - Added the `ApkMLP` architecture matching the checkpoint.
+- `cloud/backend/app/scanners/apk/__init__.py`
+- `cloud/backend/app/apk_scanner.py`
+  - Added compatibility wrappers for app imports.
+- `cloud/backend/app/models/apk_models/apk.pth`
+- `cloud/backend/app/models/apk_models/latest_metrics.json`
+  - Added APK model artifacts copied from Lincoln's APK training folder.
+- `cloud/backend/app/scanner.py`
+  - Routes `.apk` files to the APK scanner.
+  - Includes APK readiness in ML status.
+- `cloud/backend/app/scanners/router.py`
+  - Mirrors `.apk` support for the older scanner router path.
+- `cloud/backend/app/main.py`
+  - Unsupported-file message now lists `.apk`.
+- `user/watcher/folder_watcher.py`
+  - Watches and uploads `.apk` files.
+- `user/Frontend/src/pages/ScanPage.jsx`
+- `user/Frontend/src/pages/ResultPage.jsx`
+  - Show APK malware probability, APK structural risk, evidence level, DEX count, and certificate count.
+
+Verification commands:
+
+```powershell
+cd "D:\Sem VIII\Project\CyberShield Innovators"
+python -m compileall cloud\backend\app\scanners\apk
+```
+
+```powershell
+cd "D:\Sem VIII\Project\CyberShield Innovators"
+$env:PYTHONPATH='cloud\backend'
+python -c "from app.apk_scanner import ml_stack_status; import json; print(json.dumps(ml_stack_status(), indent=2, default=str))"
+```
+
+Expected status:
+- `ready` is `true`.
+- `model_exists` is `true`.
+- `metrics_exists` is `true`.
+- `preprocessing_version` is `ember_raw_counts_v2`.
+
+Runtime verification:
+- Restart the FastAPI backend after scanner changes.
+- Scan an APK.
+- Confirm the new log line in `cloud/backend/app/reports/scan_events.jsonl` contains:
+
+```json
+"engine": "apk-ml",
+"apk_preprocessing_version": "ember_raw_counts_v2"
+```
+
+Backend restart command:
+
+```powershell
+cd "D:\Sem VIII\Project\CyberShield Innovators\cloud\backend"
+.\.venv-ml\Scripts\python.exe -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+Rollback notes:
+- If APK scoring becomes extreme again, first check whether the backend was restarted and whether log entries include `apk_preprocessing_version: ember_raw_counts_v2`.
+- If the marker is missing, the running backend is using old code.
+- If the marker is present but false positives remain high, the next fix should be model/data work: use the exact EMBER2024 APK feature extractor or retrain on the app's raw-APK extractor output.
+
 ## Update - 2026-05-15
 
 Working demo state:

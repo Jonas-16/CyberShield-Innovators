@@ -7,6 +7,7 @@ from typing import Any
 SCAN_LOG_FILE = Path(__file__).resolve().parent / 'reports' / 'scan_events.jsonl'
 IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff', '.webp'}
 EXECUTABLE_EXTENSIONS = {'.exe'}
+APK_EXTENSIONS = {'.apk'}
 
 
 @lru_cache(maxsize=1)
@@ -27,6 +28,12 @@ def _get_stg_decoder():
     return scanner
 
 
+@lru_cache(maxsize=1)
+def _get_apk_scanner():
+    from app import apk_scanner
+    return apk_scanner
+
+
 def write_scan_event(payload: dict[str, Any]) -> dict[str, Any]:
     return _get_zd_scanner().write_scan_event(payload)
 
@@ -39,9 +46,13 @@ def _is_executable_file(target: Path) -> bool:
     return target.suffix.lower() in EXECUTABLE_EXTENSIONS
 
 
+def _is_apk_file(target: Path) -> bool:
+    return target.suffix.lower() in APK_EXTENSIONS
+
+
 def is_supported_file(file_path: str | Path) -> bool:
     target = Path(file_path)
-    return _is_image_file(target) or _is_executable_file(target)
+    return _is_image_file(target) or _is_executable_file(target) or _is_apk_file(target)
 
 
 def _normalize_stg_result(payload: dict[str, Any]) -> dict[str, Any]:
@@ -140,6 +151,9 @@ def scan_file(file_path: str | Path, log_event: bool = True, **kwargs: Any) -> d
             return write_scan_event(payload)
         return payload
 
+    if _is_apk_file(target):
+        return _get_apk_scanner().scan_file(target, log_event=log_event)
+
     if not _is_executable_file(target):
         raise ValueError(f"Unsupported file type for scanning: {target.suffix.lower() or '<no extension>'}")
 
@@ -156,9 +170,11 @@ def scan_file(file_path: str | Path, log_event: bool = True, **kwargs: Any) -> d
 def ml_stack_status() -> dict[str, Any]:
     zd_status = _get_zd_scanner().ml_stack_status()
     stg_status = _get_stg_scanner().scanner_status()
+    apk_status = _get_apk_scanner().ml_stack_status()
     return {
-        'ready': bool(zd_status.get('ready')) and bool(stg_status.get('ready')),
+        'ready': bool(zd_status.get('ready')) and bool(stg_status.get('ready')) and bool(apk_status.get('ready')),
         'zd': zd_status,
         'stg': stg_status,
+        'apk': apk_status,
     }
 

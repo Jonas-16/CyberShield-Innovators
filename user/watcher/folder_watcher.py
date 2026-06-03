@@ -29,7 +29,7 @@ POLL_INTERVAL_SECONDS = float(os.environ.get("CYBERSHIELD_WATCH_INTERVAL", "2"))
 STABLE_SECONDS = float(os.environ.get("CYBERSHIELD_FILE_STABLE_SECONDS", "3"))
 UPLOAD_RETRY_SECONDS = float(os.environ.get("CYBERSHIELD_UPLOAD_RETRY_SECONDS", "300"))
 MAX_UPLOADS_PER_SCAN = max(1, int(os.environ.get("CYBERSHIELD_MAX_UPLOADS_PER_SCAN", "1")))
-SUPPORTED_EXTENSIONS = {".exe", ".jpg", ".jpeg", ".jfif", ".png", ".bmp", ".gif", ".tif", ".tiff", ".webp"}
+SUPPORTED_EXTENSIONS = {".exe", ".apk", ".jpg", ".jpeg", ".jfif", ".png", ".bmp", ".gif", ".tif", ".tiff", ".webp"}
 WATCHER_STARTED_AT = time.time()
 
 

@@ -15,7 +15,8 @@ DEFAULT_UNSAFE_THRESHOLD = 0.80
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".jfif", ".png", ".bmp", ".gif", ".tif", ".tiff", ".webp"}
 ZD_EXTENSIONS = {".exe"}
-SUPPORTED_EXTENSIONS = IMAGE_EXTENSIONS | ZD_EXTENSIONS
+APK_EXTENSIONS = {".apk"}
+SUPPORTED_EXTENSIONS = IMAGE_EXTENSIONS | ZD_EXTENSIONS | APK_EXTENSIONS
 
 
 def is_supported_file(file_path):
@@ -28,6 +29,8 @@ def _get_scanner_module(file_path):
         return import_module("app.stg_scanner")
     if suffix in ZD_EXTENSIONS:
         return import_module("app.zd_scanner")
+    if suffix in APK_EXTENSIONS:
+        return import_module("app.apk_scanner")
     return None
 
 
@@ -219,7 +222,7 @@ def scan_file(file_path: str | Path, log_event: bool = True, **kwargs: Any):
         )
         payload = _normalize_image_result(raw_result, module)
         payload = _attach_decoder_result(payload, target)
-    else:
+    elif suffix in ZD_EXTENSIONS:
         payload = module.scan_file(
             target,
             block_threshold=float(kwargs.get("block_threshold", getattr(module, "DEFAULT_BLOCK_THRESHOLD", 0.8))),
@@ -227,6 +230,8 @@ def scan_file(file_path: str | Path, log_event: bool = True, **kwargs: Any):
             fusion_alpha=float(kwargs.get("fusion_alpha", 0.7)),
             log_event=False,
         )
+    else:
+        payload = module.scan_file(target, log_event=False)
 
     return write_scan_event(payload) if log_event else payload
 
@@ -234,8 +239,10 @@ def scan_file(file_path: str | Path, log_event: bool = True, **kwargs: Any):
 def ml_stack_status():
     stg_ready = False
     zd_ready = False
+    apk_ready = False
     stg_error = None
     zd_error = None
+    apk_error = None
 
     try:
         stg_module = import_module("app.stg_scanner")
@@ -253,10 +260,17 @@ def ml_stack_status():
     except Exception as exc:
         zd_error = str(exc)
 
+    try:
+        apk_status = import_module("app.apk_scanner").ml_stack_status()
+        apk_ready = bool(apk_status.get("ready"))
+    except Exception as exc:
+        apk_error = str(exc)
+
     return {
-        "ready": stg_ready or zd_ready,
+        "ready": stg_ready or zd_ready or apk_ready,
         "stg": {"ready": stg_ready, "error": stg_error},
         "zd": {"ready": zd_ready, "error": zd_error},
+        "apk": {"ready": apk_ready, "error": apk_error},
     }
 
 

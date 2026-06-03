@@ -401,8 +401,17 @@ export default function ResultPage({ overallResult, currentUser }) {
     const decisionTag = `Decision: ${getDecisionLabel(scan, resultText)}`;
     const engineTag = `Engine: ${scan.engine || 'unknown'}`;
     const riskTag = `Risk Score: ${formatRiskPercent(risk)}`;
+    const apkTag = typeof scan.apk_malware_prob === 'number'
+      ? `APK Malware: ${formatRiskPercent(scan.apk_malware_prob)}`
+      : null;
+    const apkStructureTag = typeof scan.apk_structural_risk === 'number'
+      ? `APK Structure: ${formatRiskPercent(scan.apk_structural_risk)}`
+      : null;
+    const apkEvidenceTag = scan.apk_static_analysis?.evidence_level
+      ? `APK Evidence: ${scan.apk_static_analysis.evidence_level}`
+      : null;
     const warnTag = scan.scanner_warning ? 'Model: Fallback mode' : 'Model: Active';
-    return [decisionTag, engineTag, riskTag, warnTag];
+    return [decisionTag, engineTag, riskTag, apkTag, apkStructureTag, apkEvidenceTag, warnTag].filter(Boolean);
   }, [scan, risk, resultText]);
 
   const saveFile = async () => {
