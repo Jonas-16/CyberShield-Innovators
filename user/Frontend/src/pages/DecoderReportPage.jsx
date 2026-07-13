@@ -30,6 +30,12 @@ function decoderFromPayload(payload) {
 
 function summaryRows(decoder) {
   if (!decoder) return [];
+  if (decoder.error) {
+    return [
+      { label: 'Decoder Status', value: 'Error' },
+      { label: 'Reason', value: decoder.error },
+    ];
+  }
   if (decoder.skipped) {
     return [
       { label: 'Decoder Status', value: 'Skipped' },
@@ -38,16 +44,15 @@ function summaryRows(decoder) {
   }
   return [
     { label: 'Readable Message', value: decoder.readable_message_found ? 'Yes' : 'No' },
+    { label: 'Extracted Data', value: decoder.extracted_data ? 'Available' : 'None' },
     { label: 'Protected', value: decoder.likely_encrypted_or_protected ? 'Yes' : 'No' },
     { label: 'Passphrase Required', value: decoder.passphrase_required ? 'Yes' : 'No' },
-    { label: 'Candidates', value: String(decoder.candidate_count ?? 0) },
-    { label: 'Artifacts', value: String(decoder.artifact_count ?? 0) },
     { label: 'Suspected Tool', value: decoder.suspected_tool || 'Unknown' },
   ];
 }
 
-function artifactIsImage(artifact) {
-  return /\.(png|jpe?g|gif|webp)$/i.test(String(artifact?.file_name || ''));
+function extractedDataIsImage(item) {
+  return item?.type === 'image' || /\.(png|jpe?g|gif|webp|bmp)$/i.test(String(item?.file_name || item?.extension || ''));
 }
 
 export default function DecoderReportPage({ currentUser }) {
@@ -55,7 +60,7 @@ export default function DecoderReportPage({ currentUser }) {
   const latestScanKey = scopedKey(LATEST_SCAN_KEY, userId);
   const [payload, setPayload] = useState(null);
   const [message, setMessage] = useState('');
-  const [showDecodedData, setShowDecodedData] = useState(false);
+  const [extractedImageFailed, setExtractedImageFailed] = useState(false);
 
   useEffect(() => {
     const raw = localStorage.getItem(latestScanKey);
@@ -93,26 +98,31 @@ export default function DecoderReportPage({ currentUser }) {
   }, [latestScanKey, userId]);
 
   const decoder = decoderFromPayload(payload);
-  const reportUrl = absoluteReportUrl(decoder?.report_url);
   const cleanImageUrl = absoluteReportUrl(decoder?.sanitized_image?.url);
   const cleanImageDownloadUrl = downloadUrl(decoder?.sanitized_image?.url);
   const rows = useMemo(() => summaryRows(decoder), [decoder]);
   const fileName = payload?.file_name || payload?.scan_result?.file_name || '';
-  const candidates = Array.isArray(decoder?.candidates) ? decoder.candidates : [];
-  const findings = Array.isArray(decoder?.findings) ? decoder.findings : [];
-  const artifacts = Array.isArray(decoder?.artifacts) ? decoder.artifacts : [];
-  const imageArtifacts = artifacts.filter(artifactIsImage);
-  const fileArtifacts = artifacts.filter((artifact) => !artifactIsImage(artifact));
+  const extractedData = decoder?.extracted_data || null;
+  const extractedDataUrl = assetUrl(decoder, extractedData?.file_name);
+  const extractedDataImage = extractedDataIsImage(extractedData);
+
+  useEffect(() => {
+    setExtractedImageFailed(false);
+  }, [extractedDataUrl]);
 
   return (
     <section className="page decoder-page">
       <h2>Decoder Report</h2>
-      <p className="page-help">Review recovered hidden-message candidates and steganography artifacts.</p>
+      <p className="page-help">Review the cleaned image and the single best recovered hidden payload.</p>
+      <div className="decoder-info-note">
+        The decoder checks the image areas where hidden data is commonly stored, then shows the clearest recovered result here. If it finds text, you will see the message. If it finds an image, you will see that image.
+      </div>
 
       <div className="decoder-summary">
         <article className="card">
           <h3>Cleaned Image</h3>
           {fileName && <p className="scan-file">Scanned file: {fileName}</p>}
+          {decoder?.error && <p className="scan-message">Decoder error: {decoder.error}</p>}
           {decoder?.sanitized_image?.method && <p className="scan-message">{decoder.sanitized_image.method}</p>}
           {decoder?.sanitized_image?.error && <p className="scan-message">{decoder.sanitized_image.error}</p>}
           {decoder?.skipped && <p className="scan-message">{decoder.reason || 'No decode needed for this file.'}</p>}
@@ -136,92 +146,30 @@ export default function DecoderReportPage({ currentUser }) {
             ))}
           </article>
         )}
-
       </div>
 
-      {decoder && !decoder.skipped && (
-        <div className="action-row">
-          <button type="button" className="btn" onClick={() => setShowDecodedData((value) => !value)}>
-            {showDecodedData ? 'Hide Decoded Data' : 'Show Decoded Data'}
-          </button>
-        </div>
-      )}
-
-      {reportUrl && showDecodedData && !decoder?.skipped && (
-        <div className="decoded-data-panel">
-          <div className="action-row">
-            <a className="btn" href={reportUrl} target="_blank" rel="noreferrer">Open Full Report</a>
-          </div>
-          <div className="decoder-native-grid">
-            <article className="card">
-              <h3>Decoded Candidates</h3>
-              {candidates.length === 0 ? (
-                <p className="muted-text">No readable hidden-message candidates were recovered.</p>
+      {decoder && !decoder.skipped && !decoder.error && (
+        <article className="card extracted-data-card">
+          <h3>Extracted Data</h3>
+          {!extractedData ? (
+            <p className="muted-text">No readable hidden data was recovered.</p>
+          ) : (
+            <div className="extracted-data-preview">
+              {extractedDataImage && extractedDataUrl && !extractedImageFailed ? (
+                <img
+                  className="extracted-image"
+                  src={extractedDataUrl}
+                  alt="Extracted hidden data"
+                  onError={() => setExtractedImageFailed(true)}
+                />
+              ) : extractedDataImage && extractedImageFailed ? (
+                <p className="muted-text">The extracted image could not be displayed. Rescan the original file after restarting the backend.</p>
               ) : (
-                <div className="decoder-card-list">
-                  {candidates.map((candidate) => {
-                    const href = assetUrl(decoder, candidate.file_name);
-                    return (
-                      <div className="decoder-item" key={`${candidate.kind}-${candidate.file_name}`}>
-                        <p><strong>{candidate.kind}</strong> {candidate.name}</p>
-                        <p className="scan-meta">{candidate.size} bytes, score {Number(candidate.score || 0).toFixed(2)}</p>
-                        {candidate.note && <p className="scan-message">{candidate.note}</p>}
-                        {href && <a href={href} target="_blank" rel="noreferrer">Open candidate</a>}
-                      </div>
-                    );
-                  })}
-                </div>
+                <pre className="decoded-text-block">{extractedData.content || 'Decoded text is not available in this scan result.'}</pre>
               )}
-            </article>
-
-            <article className="card">
-              <h3>Assessment</h3>
-              {findings.length === 0 ? (
-                <p className="muted-text">No extra findings.</p>
-              ) : (
-                <div className="decoder-card-list">
-                  {findings.map((finding) => (
-                    <div className="decoder-item" key={`${finding.level}-${finding.title}`}>
-                      <span className={`tag ${finding.level === 'high' ? 'bad' : finding.level === 'medium' ? 'warn' : 'ok'}`}>{finding.level}</span>
-                      <p><strong>{finding.title}</strong></p>
-                      <p className="scan-meta">{finding.detail}</p>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </article>
-          </div>
-
-          {imageArtifacts.length > 0 && (
-            <article className="card">
-              <h3>Visual Artifacts</h3>
-              <div className="artifact-preview-grid">
-                {imageArtifacts.map((artifact) => {
-                  const href = assetUrl(decoder, artifact.file_name);
-                  return (
-                    <a className="artifact-preview" href={href} target="_blank" rel="noreferrer" key={artifact.file_name}>
-                      <span>{artifact.name}</span>
-                      <img src={href} alt={artifact.name} />
-                    </a>
-                  );
-                })}
-              </div>
-            </article>
+            </div>
           )}
-
-          {fileArtifacts.length > 0 && (
-            <article className="card">
-              <h3>Analysis Files</h3>
-              <div className="decoder-link-list">
-                {fileArtifacts.map((artifact) => (
-                  <a href={assetUrl(decoder, artifact.file_name)} target="_blank" rel="noreferrer" key={artifact.file_name}>
-                    {artifact.name} <span>{artifact.kind}</span>
-                  </a>
-                ))}
-              </div>
-            </article>
-          )}
-        </div>
+        </article>
       )}
     </section>
   );

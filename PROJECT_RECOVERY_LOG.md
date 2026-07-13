@@ -486,7 +486,7 @@ Files changed for this working state:
   - Added `Review` result mapping.
   - Keeps Review files in manual review instead of auto-deleting.
   - Serves decoder report assets and cleaned image downloads.
-- `cloud/backend/app/scanners/stg_decoder/`
+- `cloud/Decoder/`
   - Added the local decoder/recovery tool and backend wrapper.
 - `user/Frontend/src/pages/DecoderReportPage.jsx`
   - Added the app-styled decoder report page.
@@ -528,5 +528,5 @@ Verified result summary:
 - Latest pushed commit: `172b486` (`Integrate stego decoder and review workflow`)
 
 Rollback notes:
-- If decoder reports become noisy, remove generated folders under `cloud/backend/app/reports/stego_decoder/`; they are output artifacts, not required source code.
+- If decoder reports become noisy, remove generated folders under `cloud/Decoder/reports/`; they are output artifacts, not required source code.
 - If Review behavior is too strict or too lenient, tune `DEFAULT_REVIEW_THRESHOLD` and `DEFAULT_UNSAFE_THRESHOLD` in `cloud/backend/app/scanner.py`, then restart the backend.

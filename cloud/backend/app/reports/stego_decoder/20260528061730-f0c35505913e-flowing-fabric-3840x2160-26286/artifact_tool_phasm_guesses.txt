@@ -1,3 +1,0 @@
-Generated guesses: 30
-Passphrases are not written to this log.
-Tried 30 generated passphrase guess(es). No match.

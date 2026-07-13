@@ -41,7 +41,7 @@ SANDBOX_APPROVE_MARKER = ".approved"
 SANDBOX_REJECT_MARKER = ".rejected"
 MAX_FILE_SIZE_BYTES = 1024 * 1024 * 1024  # 1 GB
 SCAN_RESULTS: dict[str, dict[str, Any]] = {}
-DECODER_REPORT_ROOT = Path(__file__).resolve().parent / "reports" / "stego_decoder"
+DECODER_REPORT_ROOT = Path(__file__).resolve().parents[2] / "Decoder" / "reports"
 APP_STARTED_AT = datetime.now(timezone.utc)
 SCAN_JOB_QUEUE: queue.Queue[dict[str, Any]] = queue.Queue()
 SCAN_WORKER_STARTED = False
@@ -547,29 +547,54 @@ def start_background_scan(
     return payload
 
 
-def read_scan_logs(limit: int, user_id: str | None = None) -> list[dict[str, Any]]:
+def iter_scan_log_events() -> list[dict[str, Any]]:
     if not SCAN_LOG_FILE.exists():
         return []
 
+    try:
+        text = SCAN_LOG_FILE.read_text(encoding="utf-8-sig")
+    except Exception:
+        return []
+
+    decoder = json.JSONDecoder()
+    events: list[dict[str, Any]] = []
+    index = 0
+    length = len(text)
+
+    while index < length:
+        while index < length and text[index].isspace():
+            index += 1
+        if index >= length:
+            break
+
+        try:
+            event, next_index = decoder.raw_decode(text, index)
+        except json.JSONDecodeError:
+            next_newline = text.find("\n", index)
+            if next_newline == -1:
+                break
+            index = next_newline + 1
+            continue
+
+        if isinstance(event, dict):
+            events.append(dict(event))
+        index = next_index
+
+    return events
+
+
+def read_scan_logs(limit: int, user_id: str | None = None) -> list[dict[str, Any]]:
     owner_id = normalize_user_id(user_id) if user_id is not None else None
     events: list[dict[str, Any]] = []
-    with SCAN_LOG_FILE.open("r", encoding="utf-8") as handle:
-        for line in handle:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                event = dict(json.loads(line))
-            except Exception:
-                continue
-            if owner_id is not None and normalize_user_id(event.get("user_id")) != owner_id:
-                continue
-            event["overall_result"] = overall_result_for(event)
-            events.append(event)
+
+    for event in iter_scan_log_events():
+        if owner_id is not None and normalize_user_id(event.get("user_id")) != owner_id:
+            continue
+        event["overall_result"] = overall_result_for(event)
+        events.append(event)
 
     events.sort(key=lambda item: str(item.get("ts", "")), reverse=True)
     return events[:limit]
-
 
 def event_scan_key(event: dict[str, Any]) -> str:
     file_name = Path(str(event.get("file_name") or event.get("path") or "")).name
@@ -631,29 +656,20 @@ def get_latest_log_event(current_session_only: bool = False, user_id: str | None
 
 def find_logged_event(file_name: str, user_id: str | None = None) -> dict[str, Any] | None:
     safe_name = Path(file_name).name
-    if not safe_name or not SCAN_LOG_FILE.exists():
+    if not safe_name:
         return None
 
     owner_id = normalize_user_id(user_id) if user_id is not None else None
     latest_match: dict[str, Any] | None = None
-    with SCAN_LOG_FILE.open("r", encoding="utf-8") as handle:
-        for line in handle:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                event = dict(json.loads(line))
-            except Exception:
-                continue
-            if Path(str(event.get("file_name", ""))).name != safe_name:
-                continue
-            if owner_id is not None and normalize_user_id(event.get("user_id")) != owner_id:
-                continue
-            latest_match = event
+    for event in iter_scan_log_events():
+        if Path(str(event.get("file_name", ""))).name != safe_name:
+            continue
+        if owner_id is not None and normalize_user_id(event.get("user_id")) != owner_id:
+            continue
+        latest_match = event
     if latest_match:
         latest_match["overall_result"] = overall_result_for(latest_match)
     return latest_match
-
 
 def resolve_managed_file(file_name: str, user_id: str | None = None) -> Path:
     safe_name = Path(file_name).name
@@ -938,7 +954,7 @@ def download_decoder_report_asset(
     asset_name: str,
     download: bool = Query(default=False),
 ) -> FileResponse:
-    asset_path = resolve_decoder_report_asset(report_id, asset_name or "scan_report.html")
+    asset_path = resolve_decoder_report_asset(report_id, asset_name or "scan_report.txt")
     if download:
         return FileResponse(path=asset_path, filename=asset_path.name)
     return FileResponse(path=asset_path)

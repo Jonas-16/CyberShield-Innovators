@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from datetime import datetime, timezone
 from importlib import import_module
 from pathlib import Path
@@ -138,7 +139,7 @@ def _attach_decoder_result(payload: dict[str, Any], target: Path) -> dict[str, A
         return enriched
 
     try:
-        decoder = import_module("app.scanners.stg_decoder.scanner")
+        decoder = import_module("Decoder.scanner")
         decoder_result = decoder.scan_file(target)
     except Exception as exc:
         enriched["stego_decoder"] = {
@@ -183,7 +184,6 @@ def _attach_decoder_result(payload: dict[str, Any], target: Path) -> dict[str, A
     enriched["reasons"] = list(dict.fromkeys(reason for reason in reasons if reason))
     enriched["hidden_payload_found"] = bool(decoder_result.get("readable_message_found"))
     enriched["cleaned_image_verified"] = bool(cleaned_image)
-    enriched["decoder_report_url"] = decoder_result.get("report_url")
     enriched["sanitized_image_url"] = (decoder_result.get("sanitized_image") or {}).get("url")
     return enriched
 

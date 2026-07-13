@@ -13,8 +13,8 @@ from PIL.PngImagePlugin import PngInfo
 
 from . import hstego
 
-APP_ROOT = Path(__file__).resolve().parents[2]
-REPORT_ROOT = APP_ROOT / "reports" / "stego_decoder"
+DECODER_ROOT = Path(__file__).resolve().parent
+REPORT_ROOT = DECODER_ROOT / "reports"
 DEFAULT_GUESS_LIMIT = 30
 
 
@@ -25,7 +25,7 @@ def _safe_report_id(target: Path) -> str:
     return f"{stamp}-{digest}-{stem[:40] or 'image'}"
 
 
-def _public_report_url(report_id: str, file_name: str = "scan_report.html") -> str:
+def _public_report_url(report_id: str, file_name: str) -> str:
     return f"/api/scan/reports/{report_id}/{file_name}"
 
 
@@ -105,7 +105,5 @@ def scan_file(
         }
 
     summary["report_id"] = report_id
-    summary["report_url"] = _public_report_url(report_id)
-    summary["text_report_url"] = _public_report_url(report_id, "scan_report.txt")
     summary["stdout"] = stdout.getvalue().strip()
     return summary

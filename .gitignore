@@ -79,3 +79,7 @@ dist/
 # Keep the cloud scanner model bundle with the cloud/backend package.
 !cloud/backend/app/models/
 !cloud/backend/app/models/**
+
+# Decoder runtime artifacts
+cloud/Decoder/reports/*
+!cloud/Decoder/reports/.gitkeep

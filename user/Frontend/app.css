@@ -1,4 +1,4 @@
-﻿:root {
+:root {
   --bg: #0b1220;
   --bg-accent-1: #11203b;
   --bg-accent-2: #13284a;
@@ -638,6 +638,14 @@ th {
   gap: 12px;
 }
 
+
+.decoder-info-note {
+  border: 1px solid var(--line);
+  background: var(--surface-soft);
+  color: var(--muted);
+  padding: 12px 14px;
+  line-height: 1.5;
+}
 .decoder-summary {
   display: grid;
   grid-template-columns: minmax(0, 1.1fr) minmax(280px, 0.9fr);
@@ -674,6 +682,38 @@ th {
   margin-top: 12px;
 }
 
+
+.extracted-data-card {
+  display: grid;
+  gap: 12px;
+}
+
+.extracted-data-preview {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.extracted-image {
+  width: min(100%, 720px);
+  max-height: 560px;
+  object-fit: contain;
+  border: 1px solid var(--line);
+  background: var(--surface-soft);
+}
+
+.decoded-text-block {
+  margin: 0;
+  max-height: 520px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  border: 1px solid var(--line);
+  background: var(--surface-soft);
+  color: var(--text);
+  padding: 12px;
+  font: 0.95rem/1.5 ui-monospace, SFMono-Regular, Consolas, 'Liberation Mono', monospace;
+}
 .cleaned-image-panel img {
   width: min(100%, 520px);
   max-height: 420px;
@@ -782,6 +822,7 @@ table {
   min-width: 1120px;
 }
 
+
 .logs-col-file {
   width: 40%;
 }
@@ -819,6 +860,7 @@ td {
   padding: 14px 12px;
   vertical-align: middle;
 }
+
 
 .logs-file-name {
   overflow: hidden;

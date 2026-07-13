@@ -376,7 +376,6 @@ export default function ResultPage({ overallResult, currentUser }) {
     ? 'ML engine is unavailable; running heuristic fallback mode.'
     : '';
   const decoder = scan?.stego_decoder || null;
-  const decoderReportUrl = absoluteReportUrl(decoder?.report_url || scan?.decoder_report_url);
   const cleanImageUrl = absoluteReportUrl(decoder?.sanitized_image?.url || scan?.sanitized_image_url);
   const cleanImageDownloadUrl = downloadUrl(decoder?.sanitized_image?.url || scan?.sanitized_image_url);
   const isActiveSandboxReview = Boolean(
@@ -578,11 +577,6 @@ export default function ResultPage({ overallResult, currentUser }) {
       )}
       {decoder?.skipped && <p className="scan-message">{decoder.reason || 'No decode needed for this file.'}</p>}
       {decoder?.recommendation && <p className="scan-message">Decoded data available on request: {decoder.recommendation}</p>}
-      {decoderReportUrl && !decoder?.skipped && (
-        <p className="scan-message">
-          <a href={decoderReportUrl} target="_blank" rel="noreferrer">Show decoded data report</a>
-        </p>
-      )}
       {savedNotice && <p className="scan-message">{savedNotice}</p>}
       {message && <p className="scan-message">{message}</p>}
     </section>

@@ -4,7 +4,7 @@ This folder contains the files needed on the backend/cloud laptop.
 
 - `backend/` - FastAPI scanner API, scanner routing, ML scanner code, and model files.
 - `sandbox/` - optional legacy Windows Sandbox monitor for local interception demos.
-- `Decoder/` - currently empty placeholder kept from the original project layout.
+- `Decoder/` - steganography decoder/recovery module and runtime report output.
 
 Run the scanner API:
 

@@ -2,7 +2,6 @@ import React, { useEffect, useState } from 'react';
 
 const API_BASE_URL = import.meta.env.VITE_BACKEND_URL || 'http://127.0.0.1:8000';
 const REFRESH_INTERVAL_MS = 5000;
-const FOLLOW_UP_ACTIONS = new Set(['approved_via_result_page', 'rejected_via_result_page', 'deleted']);
 
 function statusClass(status) {
   if (status === 'Malicious') return 'tag bad';
@@ -43,25 +42,6 @@ function resultText(entry) {
   return entry?.overall_result || 'Safe';
 }
 
-function scanKey(entry) {
-  return `${entry?.file_name || ''}:${entry?.path || ''}`;
-}
-
-function dedupeScans(items) {
-  const rows = [];
-  const seen = new Set();
-
-  items.forEach((entry) => {
-    if (FOLLOW_UP_ACTIONS.has(entry?.post_action)) return;
-    const key = scanKey(entry);
-    if (seen.has(key)) return;
-    seen.add(key);
-    rows.push(entry);
-  });
-
-  return rows;
-}
-
 function safetyScore(entry, status) {
   const risk = typeof entry?.fused_risk === 'number' ? entry.fused_risk : null;
   if (risk === null) return '-';
@@ -80,17 +60,16 @@ function deviceLabel(entry) {
   return os ? `${name} (${os})` : name;
 }
 
-export default function LogsPage({ currentUser }) {
+export default function LogsPage() {
   const [items, setItems] = useState([]);
   const [message, setMessage] = useState('');
-  const userId = currentUser?.id || 'guest';
 
   useEffect(() => {
     let active = true;
 
     const load = async () => {
       try {
-        const response = await fetch(`${API_BASE_URL}/api/scan/logs?limit=100&user_id=${encodeURIComponent(userId)}`);
+        const response = await fetch(`${API_BASE_URL}/api/scan/logs?limit=500`);
         if (!response.ok) {
           const payload = await response.json();
           throw new Error(payload?.detail || 'Failed to load scan logs');
@@ -98,7 +77,7 @@ export default function LogsPage({ currentUser }) {
 
         const payload = await response.json();
         if (!active) return;
-        setItems(dedupeScans(Array.isArray(payload.items) ? payload.items : []));
+        setItems(Array.isArray(payload.items) ? payload.items : []);
         setMessage('');
       } catch (error) {
         if (!active) return;
@@ -113,12 +92,12 @@ export default function LogsPage({ currentUser }) {
       active = false;
       clearInterval(timer);
     };
-  }, [userId]);
+  }, []);
 
   return (
     <section className="page">
       <h2>Logs Page</h2>
-      <p className="page-help">This is {currentUser?.name}'s scan history. Newest scan appears at the top.</p>
+      <p className="page-help">All scan log entries are shown here. Newest scan appears at the top.</p>
       {message && <p className="scan-message">{message}</p>}
 
       <div className="card table-wrap logs-table-wrap">

@@ -24,7 +24,7 @@ def _get_stg_scanner():
 
 @lru_cache(maxsize=1)
 def _get_stg_decoder():
-    from app.scanners.stg_decoder import scanner
+    from Decoder import scanner
     return scanner
 
 
@@ -127,7 +127,6 @@ def _attach_decoder_result(payload: dict[str, Any], target: Path) -> dict[str, A
 
     enriched["reasons"] = list(dict.fromkeys(reason for reason in reasons if reason))
     enriched["hidden_payload_found"] = bool(decoder_result.get("readable_message_found"))
-    enriched["decoder_report_url"] = decoder_result.get("report_url")
     enriched["sanitized_image_url"] = (decoder_result.get("sanitized_image") or {}).get("url")
     return enriched
 

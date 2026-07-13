@@ -3,7 +3,7 @@
 import base64
 import binascii
 import hashlib
-import html
+import io
 import math
 import re
 import shutil
@@ -33,6 +33,9 @@ SIGNATURES = (
     (b"Rar!\x1a\x07\x00", "rar"),
     (b"7z\xbc\xaf\x27\x1c", "7z"),
 )
+IMAGE_PAYLOAD_EXTENSIONS = {"png", "jpg", "jpeg", "gif", "webp", "bmp"}
+HIGH_VALUE_RESULT_KINDS = {"phasm-message", "phasm-attachment", "decoded-base64", "decoded-hex", "appended-text"}
+
 COMMON_PASSPHRASES = (
     "password", "passphrase", "secret", "hidden", "message", "stego", "phasm",
     "test", "hello", "admin", "letmein", "qwerty", "123456", "12345678",
@@ -174,6 +177,34 @@ def looks_useful_text(data):
     return spaces > 0 or len(data) >= 30
 
 
+
+def human_text_score(data):
+    if not data:
+        return 0.0
+    sample = data[:4096]
+    printable = printable_score(sample)
+    letters = letter_score(sample)
+    spaces = sample.count(32) / len(sample)
+    digits = sum(48 <= b <= 57 for b in sample) / len(sample)
+    text = sample.decode("utf-8", errors="ignore").lower()
+    alpha = [ch for ch in text if ch.isalpha()]
+    vowel_ratio = (sum(ch in "aeiou" for ch in alpha) / len(alpha)) if alpha else 0.0
+    score = printable * 0.30 + letters * 0.30 + min(spaces * 4.0, 0.18) + min(vowel_ratio, 0.22)
+    score -= max(0.0, most_common_score(sample) - 0.28) * 0.7
+    score -= max(0.0, digits - 0.20) * 0.6
+    if len(sample) > 24 and spaces == 0 and vowel_ratio < 0.25:
+        score -= 0.25
+    return max(0.0, min(score, 1.0))
+
+
+def clean_text_payload(data):
+    text = data.decode("utf-8", errors="replace").replace("\r", "")
+    text = re.sub(r"\x00+.*$", "", text, flags=re.S)
+    lines = [line.rstrip() for line in text.split("\n")]
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return "\n".join(lines).strip()
+
 def is_metadata_text(data):
     text = data[:4096].decode("utf-8", errors="ignore").lower()
     return any(hint in text for hint in METADATA_HINTS)
@@ -260,7 +291,7 @@ def clean_previous_outputs(output_dir):
         )
         if path.is_file() and generated:
             path.unlink()
-    for name in ("scan_report.txt", "scan_report.html"):
+    for name in ("scan_report.txt",):
         report = output_dir / name
         if report.exists():
             report.unlink()
@@ -282,7 +313,11 @@ def is_readable_result(result):
         "decoded-hex",
         "appended-text",
         "image-lsb",
+        "image-lsb-file",
+        "image-lsb-visual",
+        "carved-file",
         "phasm-message",
+        "phasm-attachment",
     }
 
 
@@ -368,28 +403,65 @@ def scan_encoded_text(data, results, seen):
                 )
 
 
-def carve_embedded_files(data, results, seen):
+
+def valid_image_payload(data, extension):
+    if extension not in IMAGE_PAYLOAD_EXTENSIONS:
+        return True
+    try:
+        with Image.open(io.BytesIO(data)) as image:
+            image.verify()
+        return True
+    except Exception:
+        return False
+
+
+def bounded_carved_payload(data, offset, extension):
+    payload = data[offset:]
+    if extension == "png":
+        marker = b"IEND\xaeB`\x82"
+        end = payload.find(marker)
+        if end >= 0:
+            return payload[: end + len(marker)]
+    if extension in {"jpg", "jpeg"}:
+        end = payload.find(b"\xff\xd9", 2)
+        if end >= 0:
+            return payload[: end + 2]
+    if extension == "gif":
+        end = payload.find(b";", 6)
+        if end >= 0:
+            return payload[: end + 1]
+    return payload
+
+
+def add_embedded_file_results(data, results, seen, source_name, include_offset_zero=False, limit=3):
+    found = 0
     for signature, extension in SIGNATURES:
         start = 0
-        count = 0
         while True:
             offset = data.find(signature, start)
             if offset < 0:
                 break
             start = offset + 1
-            if offset == 0:
+            if offset == 0 and not include_offset_zero:
                 continue
-
-            count += 1
-            carved = data[offset:]
-            note = f"found signature at byte offset {offset}"
+            payload = bounded_carved_payload(data, offset, extension)
+            if len(payload) < len(signature):
+                continue
+            if not valid_image_payload(payload, extension):
+                continue
+            score = 1.0 if extension in IMAGE_PAYLOAD_EXTENSIONS else 0.85
+            note = f"found {extension} signature in {source_name} at byte offset {offset}"
             add_result(
                 results,
                 seen,
-                Result("carved-file", f"{extension}_offset_{offset}_{count}", carved, 0.0, extension, note),
+                Result("image-lsb-file" if source_name.startswith("lsb") else "carved-file", f"{source_name}_{extension}_{offset}", payload, score, extension, note),
             )
-            if count >= 10:
-                break
+            found += 1
+            if found >= limit:
+                return
+
+def carve_embedded_files(data, results, seen):
+    add_embedded_file_results(data, results, seen, "raw", include_offset_zero=False, limit=10)
 
 
 def scan_appended_payload(data, results, seen):
@@ -702,31 +774,68 @@ def bytes_from_bits(bits, bit_order):
     return np.packbits(usable, bitorder=bit_order).tobytes()
 
 
-def scan_lsb_bytes(name, bits, results, seen, max_strings=3):
+def scan_lsb_bytes(name, bits, results, seen, max_strings=3, allow_text=True):
     for bit_order in ("little", "big"):
         data = bytes_from_bits(bits, bit_order)
-        strings = extract_ascii_strings(data, min_len=30)
+        add_embedded_file_results(data, results, seen, f"lsb_{name}_{bit_order}", include_offset_zero=True, limit=2)
+
+        if not allow_text:
+            continue
+
+        strings = extract_ascii_strings(data, min_len=12)
         found = 0
         for index, candidate in enumerate(strings, start=1):
             if not looks_useful_text(candidate) or is_metadata_text(candidate):
+                continue
+            quality = human_text_score(candidate)
+            if quality < 0.48:
                 continue
             found += 1
             add_result(
                 results,
                 seen,
-                Result("image-lsb", f"{name}_{bit_order}_{index}", candidate, printable_score(candidate)),
+                Result("image-lsb", f"{name}_{bit_order}_{index}", candidate, quality),
             )
             if found >= max_strings:
                 break
 
         trimmed = trim_text_candidate(data)
-        if looks_useful_text(trimmed) and not is_metadata_text(trimmed):
+        quality = human_text_score(trimmed)
+        if looks_useful_text(trimmed) and quality >= 0.48 and not is_metadata_text(trimmed):
             add_result(
                 results,
                 seen,
-                Result("image-lsb", f"{name}_{bit_order}_trimmed", trimmed, printable_score(trimmed)),
+                Result("image-lsb", f"{name}_{bit_order}_trimmed", trimmed, quality),
             )
 
+
+
+def image_to_png_bytes(image):
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG", optimize=True)
+    return buffer.getvalue()
+
+
+def add_lsb_visual_candidates(arr, results, seen):
+    if arr.ndim != 3 or arr.shape[2] < 3:
+        return
+    rgb = arr[:, :, :3].astype(np.uint8)
+    for bit_plane in (0, 1):
+        visual = ((rgb >> bit_plane) & 1) * 255
+        image = Image.fromarray(visual.astype(np.uint8), mode="RGB")
+        data = image_to_png_bytes(image)
+        add_result(
+            results,
+            seen,
+            Result(
+                "image-lsb-visual",
+                f"bit{bit_plane}_rgb_visual",
+                data,
+                0.65 - (bit_plane * 0.05),
+                "png",
+                f"RGB bit-plane {bit_plane} rendered as an extracted image.",
+            ),
+        )
 
 def scan_image_lsb(input_path, results, seen):
     image = open_image(input_path)
@@ -734,6 +843,7 @@ def scan_image_lsb(input_path, results, seen):
         return
 
     arr = np.asarray(image)
+    add_lsb_visual_candidates(arr, results, seen)
     channels = arr.shape[2] if arr.ndim == 3 else 1
     channel_names = ["r", "g", "b", "a"][:channels]
 
@@ -750,12 +860,12 @@ def scan_image_lsb(input_path, results, seen):
                 )
 
             bits = ((flat[:, :channels].reshape(-1) >> bit_plane) & 1).astype(np.uint8)
-            scan_lsb_bytes(f"{traversal_name}_bit{bit_plane}_channels_interleaved", bits, results, seen)
+            scan_lsb_bytes(f"{traversal_name}_bit{bit_plane}_channels_interleaved", bits, results, seen, allow_text=bit_plane <= 1)
 
             if channels >= 3:
                 bgr = flat[:, [2, 1, 0]].reshape(-1)
                 bits = ((bgr >> bit_plane) & 1).astype(np.uint8)
-                scan_lsb_bytes(f"{traversal_name}_bit{bit_plane}_bgr_interleaved", bits, results, seen)
+                scan_lsb_bytes(f"{traversal_name}_bit{bit_plane}_bgr_interleaved", bits, results, seen, allow_text=bit_plane <= 1)
 
 
 def write_report(output_path, input_path, results, metadata, findings=None, artifacts=None, status=None):
@@ -809,150 +919,6 @@ def write_report(output_path, input_path, results, metadata, findings=None, arti
             lines.append(f"- {artifact.path.name}: {artifact.kind} {artifact.note}")
 
     report.write_text("\n".join(lines), encoding="utf-8")
-    return report
-
-
-def confidence_for_result(result):
-    if result.kind in ("decoded-base64", "decoded-hex", "appended-text"):
-        return "high"
-    if result.kind == "carved-file":
-        return "high"
-    if result.kind == "image-lsb" and result.size >= 40:
-        return "medium"
-    if result.kind == "text":
-        return "possible"
-    return "low"
-
-
-def html_escape(value):
-    return html.escape(str(value), quote=True)
-
-
-def preview_text(data, limit=500):
-    text = data[:limit].decode("utf-8", errors="replace")
-    return text.replace("\r", "")
-
-
-def write_html_report(output_path, input_path, results, metadata, findings, artifacts, status=None):
-    report = output_path / "scan_report.html"
-    cards = []
-    if results:
-        for result in results:
-            rel = result.path.name if result.path else ""
-            preview = ""
-            if result.extension == "txt":
-                preview = f"<pre>{html_escape(preview_text(result.data))}</pre>"
-            note = f"<p class='note'>{html_escape(result.note)}</p>" if result.note else ""
-            cards.append(
-                "<section class='card'>"
-                f"<div class='pill {confidence_for_result(result)}'>{confidence_for_result(result)}</div>"
-                f"<h3>{html_escape(result.kind)}: {html_escape(result.name)}</h3>"
-                f"<p><a href='{html_escape(rel)}'>{html_escape(rel)}</a> | {result.size} bytes | score {result.score:.2f}</p>"
-                f"{note}{preview}"
-                "</section>"
-            )
-    else:
-        cards.append(
-            "<section class='card'>"
-            "<div class='pill low'>none</div>"
-            "<h3>No readable hidden-message candidates found</h3>"
-            "<p>This does not prove the file is clean. It may use encryption, compression, password protection, or a custom method.</p>"
-            "</section>"
-        )
-
-    finding_html = []
-    for finding in findings:
-        finding_html.append(
-            "<li>"
-            f"<span class='pill {html_escape(finding.level)}'>{html_escape(finding.level)}</span> "
-            f"<strong>{html_escape(finding.title)}</strong><br>{html_escape(finding.detail)}"
-            "</li>"
-        )
-
-    artifact_html = []
-    for artifact in artifacts:
-        rel = artifact.path.name
-        if artifact.path.suffix.lower() in (".png", ".jpg", ".jpeg"):
-            artifact_html.append(
-                "<section class='artifact'>"
-                f"<h3>{html_escape(artifact.name)}</h3>"
-                f"<a href='{html_escape(rel)}'><img src='{html_escape(rel)}' alt='{html_escape(artifact.name)}'></a>"
-                f"<p>{html_escape(artifact.note)}</p>"
-                "</section>"
-            )
-        else:
-            artifact_html.append(
-                "<li>"
-                f"<a href='{html_escape(rel)}'>{html_escape(artifact.name)}</a> "
-                f"({html_escape(artifact.kind)}) {html_escape(artifact.note)}"
-                "</li>"
-            )
-
-    metadata_html = []
-    for item in metadata[:20]:
-        metadata_html.append(f"<li><code>{html_escape(preview_text(item, 180))}</code></li>")
-
-    html_doc = f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <title>Hidden Message Scan Report</title>
-  <style>
-    body {{ margin: 0; font-family: Segoe UI, Arial, sans-serif; background: #f5f6f8; color: #20242a; }}
-    header {{ background: #1f2937; color: white; padding: 24px 32px; }}
-    main {{ padding: 24px 32px; max-width: 1180px; margin: 0 auto; }}
-    h1, h2, h3 {{ margin-top: 0; }}
-    .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }}
-    .stat, .card, .artifact {{ background: white; border: 1px solid #d8dde6; border-radius: 8px; padding: 16px; box-shadow: 0 1px 2px rgba(0,0,0,.04); }}
-    .pill {{ display: inline-block; padding: 3px 8px; border-radius: 999px; font-size: 12px; font-weight: 700; text-transform: uppercase; }}
-    .high {{ background: #dcfce7; color: #166534; }}
-    .medium, .possible {{ background: #fef3c7; color: #92400e; }}
-    .low, .none {{ background: #e5e7eb; color: #374151; }}
-    pre {{ white-space: pre-wrap; background: #111827; color: #f9fafb; padding: 12px; border-radius: 6px; max-height: 260px; overflow: auto; }}
-    code {{ background: #eef2f7; padding: 2px 4px; border-radius: 4px; }}
-    img {{ max-width: 100%; image-rendering: pixelated; border: 1px solid #d8dde6; }}
-    a {{ color: #0f5bb5; }}
-    li {{ margin-bottom: 10px; }}
-  </style>
-</head>
-<body>
-<header>
-  <h1>Hidden Message Scan Report</h1>
-  <p>{html_escape(input_path)}</p>
-</header>
-<main>
-  <section class="grid">
-    <div class="stat"><h2>{len(results)}</h2><p>candidate files</p></div>
-    <div class="stat"><h2>{len(metadata)}</h2><p>metadata strings ignored</p></div>
-    <div class="stat"><h2>{len(artifacts)}</h2><p>analysis artifacts</p></div>
-  </section>
-
-  <h2>Final Status</h2>
-  <section class="card">
-    <p><strong>Readable message found:</strong> {html_escape('Yes' if status and status.readable_message_found else 'No')}</p>
-    <p><strong>Likely encrypted/protected:</strong> {html_escape('Yes' if status and status.likely_encrypted_or_protected else 'No')}</p>
-    <p><strong>Tool suspected:</strong> {html_escape(status.suspected_tool if status else 'Unknown')}</p>
-    <p><strong>Passphrase required:</strong> {html_escape('Yes' if status and status.passphrase_required else 'No')}</p>
-    <p><strong>Recommendation:</strong> {html_escape(status.recommendation if status else 'Review the generated report.')}</p>
-  </section>
-
-  <h2>Assessment</h2>
-  <ul>{''.join(finding_html) if finding_html else '<li>No extra findings.</li>'}</ul>
-
-  <h2>Candidates</h2>
-  {''.join(cards)}
-
-  <h2>Visual And Analysis Artifacts</h2>
-  <div class="grid">{''.join(item for item in artifact_html if item.startswith('<section'))}</div>
-  <ul>{''.join(item for item in artifact_html if item.startswith('<li>'))}</ul>
-
-  <h2>Metadata Ignored</h2>
-  <ul>{''.join(metadata_html) if metadata_html else '<li>No metadata strings were filtered.</li>'}</ul>
-</main>
-</body>
-</html>
-"""
-    report.write_text(html_doc, encoding="utf-8")
     return report
 
 
@@ -1234,6 +1200,62 @@ def decode_with_phasm_guesses(input_path, output_path, guesses, results, seen, f
     return False
 
 
+
+
+def bit_plane_penalty(result):
+    match = re.search(r"bit(\d+)", str(result.name))
+    if not match:
+        return 0.0
+    return int(match.group(1)) * 0.03
+
+
+def result_rank(result):
+    extension = str(result.extension or "").lower()
+    if result.kind in {"image-lsb-file", "carved-file", "phasm-attachment"} and extension in IMAGE_PAYLOAD_EXTENSIONS:
+        category = 6.0
+    elif result.kind in HIGH_VALUE_RESULT_KINDS:
+        category = 5.0
+    elif result.kind in {"decoded-base64", "decoded-hex", "appended-text"}:
+        category = 4.5
+    elif result.kind == "image-lsb":
+        category = 3.0
+    elif result.kind == "image-lsb-visual":
+        category = 2.8
+    elif result.kind == "text":
+        category = 2.0
+    else:
+        category = 1.0
+
+    if extension in IMAGE_PAYLOAD_EXTENSIONS:
+        quality = 1.0
+    elif result.extension == "txt" or result.kind in {"text", "image-lsb", "decoded-base64", "decoded-hex", "appended-text", "phasm-message"}:
+        quality = human_text_score(result.data)
+    else:
+        quality = float(result.score or 0.0)
+
+    return (category, quality - bit_plane_penalty(result), min(result.size, 2000000))
+
+def extracted_data_summary(result):
+    if not result or not result.path:
+        return None
+    extension = str(result.extension or "").lower()
+    item = {
+        "kind": result.kind,
+        "name": result.name,
+        "size": result.size,
+        "score": float(result.score),
+        "extension": result.extension,
+        "note": result.note,
+        "file_name": result.path.name,
+    }
+    if extension in IMAGE_PAYLOAD_EXTENSIONS:
+        item["type"] = "image"
+        return item
+
+    item["type"] = "text"
+    item["content"] = clean_text_payload(result.data)[:20000]
+    return item
+
 def build_status(input_path, results, findings, passphrase=None, wordlist_path=None):
     status = Status()
     status.readable_message_found = any(is_readable_result(result) for result in results)
@@ -1256,7 +1278,7 @@ def build_status(input_path, results, findings, passphrase=None, wordlist_path=N
         status.likely_encrypted_or_protected = False
 
     if status.readable_message_found:
-        status.recommendation = "Open the candidate files listed below."
+        status.recommendation = "Review the extracted data shown on the decoder report page."
     elif status.passphrase_required:
         status.recommendation = "A passphrase is required. Provide --passphrase or try --wordlist with likely passwords."
     elif status.likely_encrypted_or_protected:
@@ -1317,7 +1339,7 @@ def scan(
         guesses = generate_passphrase_guesses(input_path, expected_text, guess_seeds, guess_limit)
         decode_with_phasm_guesses(input_path, output_path, guesses, results, seen, findings, artifacts)
 
-    results.sort(key=lambda item: (item.score, item.size), reverse=True)
+    results.sort(key=result_rank, reverse=True)
     for index, result in enumerate(results, start=1):
         write_result(output_path, result, index)
 
@@ -1325,12 +1347,10 @@ def scan(
     status = build_status(input_path, results, findings, passphrase, wordlist_path)
 
     report = write_report(output_path, input_path, results, metadata, findings, artifacts, status)
-    html_report = write_html_report(output_path, input_path, results, metadata, findings, artifacts, status)
     scan_summary = {
         "input_path": str(input_path),
         "output_dir": str(output_path),
         "report_path": str(report),
-        "html_report_path": str(html_report),
         "candidate_count": len(results),
         "metadata_ignored_count": len(metadata),
         "artifact_count": len(artifacts),
@@ -1339,6 +1359,7 @@ def scan(
         "suspected_tool": status.suspected_tool,
         "passphrase_required": bool(status.passphrase_required),
         "recommendation": status.recommendation,
+        "extracted_data": extracted_data_summary(results[0] if results else None),
         "candidates": [
             {
                 "kind": result.kind,
@@ -1350,7 +1371,7 @@ def scan(
                 "path": str(result.path) if result.path else None,
                 "file_name": result.path.name if result.path else None,
             }
-            for result in results[:20]
+            for result in results[:1]
         ],
         "findings": [
             {
@@ -1377,14 +1398,12 @@ def scan(
         print("This does not prove the file is clean. It may use encryption, compression, or another stego method.")
         print(f"Final status: readable={'yes' if status.readable_message_found else 'no'}, protected={'yes' if status.likely_encrypted_or_protected else 'no'}, passphrase_required={'yes' if status.passphrase_required else 'no'}")
         print(f"Report: {report}")
-        print(f"HTML report: {html_report}")
         return scan_summary
 
     print("Possible hidden-message candidates:")
-    for result in results[:20]:
+    for result in results[:1]:
         print(f"  {result.path} ({result.kind}, {result.size} bytes, score {result.score:.2f})")
     print(f"Report: {report}")
-    print(f"HTML report: {html_report}")
     return scan_summary
 
 

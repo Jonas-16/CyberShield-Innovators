@@ -9,6 +9,7 @@ supported file type and return a structured verdict for the UI.
 - `user/Frontend/` - React + Vite UI for uploading files and viewing scan results.
 - `user/watcher/` - optional user-device folder watcher that uploads supported files automatically.
 - `cloud/backend/` - FastAPI scanner service, ML scanner code, model artifacts, and result APIs.
+- `cloud/Decoder/` - steganography decoder/recovery module used by the backend for image scans.
 - `cloud/sandbox/` - optional legacy Windows Sandbox tooling for local download interception demos.
 
 ## Supported Scanners
@@ -16,6 +17,10 @@ supported file type and return a structured verdict for the UI.
 - Image steganography scans for `.jpg`, `.jpeg`, `.jfif`, `.png`, `.bmp`, `.gif`, `.tif`, `.tiff`, and `.webp`.
 - Windows executable zero-day scans for `.exe`.
 - Android APK zero-day scans for `.apk`.
+
+Image scans also run the decoder module in `cloud/Decoder/`. Decoder runtime reports and
+extracted payload artifacts are written to `cloud/Decoder/reports/`; the `.gitkeep` file is
+tracked, while generated report contents are ignored.
 
 APK scanning uses `cloud/backend/app/scanners/apk/` with the model artifact in
 `cloud/backend/app/models/apk_models/apk.pth`. APK results include model probabilities,

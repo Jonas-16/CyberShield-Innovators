@@ -211,7 +211,6 @@ export default function ScanPage({ currentUser }) {
   const scanDetails = useMemo(() => {
     return buildDetailRows(result);
   }, [result]);
-  const decoderReportUrl = absoluteReportUrl(result?.scan_result?.stego_decoder?.report_url);
   const cleanImageUrl = absoluteReportUrl(result?.scan_result?.stego_decoder?.sanitized_image?.url);
   const cleanImageDownloadUrl = downloadUrl(result?.scan_result?.stego_decoder?.sanitized_image?.url);
 
@@ -275,11 +274,6 @@ export default function ScanPage({ currentUser }) {
         {cleanImageUrl && (
           <p className="scan-message">
             Cleaned image ready: <a href={cleanImageDownloadUrl}>Download image with embedded data removed</a>
-          </p>
-        )}
-        {decoderReportUrl && (
-          <p className="scan-message">
-            <a href={decoderReportUrl} target="_blank" rel="noreferrer">Show decoded data report</a>
           </p>
         )}
         {scanDetails.length > 0 && (
