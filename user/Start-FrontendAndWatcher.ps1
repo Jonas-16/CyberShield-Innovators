@@ -3,6 +3,7 @@ $ErrorActionPreference = "Stop"
 $UserRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $WatcherDir = Join-Path $UserRoot "watcher"
 $FrontendDir = Join-Path $UserRoot "Frontend"
+$WatcherPython = Join-Path $WatcherDir ".venv\Scripts\python.exe"
 $WatcherHealthUrl = "http://127.0.0.1:8765/api/health"
 $WatcherOutLog = Join-Path $WatcherDir "watcher.out.log"
 $WatcherErrLog = Join-Path $WatcherDir "watcher.err.log"
@@ -66,10 +67,13 @@ Write-Host "Tip: for clean Ctrl+C shutdown, run this script directly instead of 
 if (Test-HttpOk -Url $WatcherHealthUrl) {
     Write-Host "Watcher is already running on 127.0.0.1:8765."
 } else {
+    if (-not (Test-Path -LiteralPath $WatcherPython)) {
+        throw "Watcher Python environment is missing: $WatcherPython. Create it with: cd $WatcherDir; python -m venv .venv; .\.venv\Scripts\python.exe -m pip install -r requirements.txt"
+    }
     Stop-StaleWatcherPort
     Write-Host "Starting folder watcher on 127.0.0.1:8765..."
     $startedWatcher = Start-Process `
-        -FilePath "python" `
+        -FilePath $WatcherPython `
         -ArgumentList @("folder_watcher.py") `
         -WorkingDirectory $WatcherDir `
         -RedirectStandardOutput $WatcherOutLog `
