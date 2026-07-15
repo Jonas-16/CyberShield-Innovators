@@ -60,9 +60,10 @@ function deviceLabel(entry) {
   return os ? `${name} (${os})` : name;
 }
 
-export default function LogsPage({ currentUser }) {
+export default function LogsPage({ currentUser, deviceId }) {
   const [items, setItems] = useState([]);
   const [message, setMessage] = useState('');
+  const [thisDeviceOnly, setThisDeviceOnly] = useState(false);
   const userId = currentUser?.id || 'guest';
 
   useEffect(() => {
@@ -71,6 +72,7 @@ export default function LogsPage({ currentUser }) {
     const load = async () => {
       try {
         const params = new URLSearchParams({ limit: '500', user_id: userId });
+        if (thisDeviceOnly) params.set('device_id', deviceId);
         const response = await fetch(`${API_BASE_URL}/api/scan/logs?${params.toString()}`);
         if (!response.ok) {
           const payload = await response.json();
@@ -94,12 +96,22 @@ export default function LogsPage({ currentUser }) {
       active = false;
       clearInterval(timer);
     };
-  }, [userId]);
+  }, [userId, deviceId, thisDeviceOnly]);
 
   return (
     <section className="page">
       <h2>Logs Page</h2>
-      <p className="page-help">Only scans for your account are shown here. Newest scan appears at the top.</p>
+      <div className="logs-toolbar">
+        <p className="page-help">Scans from all devices using your account are shown here. Newest scan appears at the top.</p>
+        <label className="logs-device-switch">
+          <input
+            type="checkbox"
+            checked={thisDeviceOnly}
+            onChange={(event) => setThisDeviceOnly(event.target.checked)}
+          />
+          <span>This device</span>
+        </label>
+      </div>
       {message && <p className="scan-message">{message}</p>}
 
       <div className="card table-wrap logs-table-wrap">

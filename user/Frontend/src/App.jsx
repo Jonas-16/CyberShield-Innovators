@@ -9,7 +9,7 @@ import DecoderReportPage from './pages/DecoderReportPage';
 import LogsPage from './pages/LogsPage';
 import SettingsPage from './pages/SettingsPage';
 import AuthPage from './pages/AuthPage';
-import { clearCurrentUser, loadCurrentUser } from './auth';
+import { clearCurrentUser, loadCurrentUser, localDeviceId } from './auth';
 
 const pages = [
   { id: 'dashboard', label: 'Dashboard' },
@@ -33,6 +33,7 @@ export default function App() {
   const [activePage, setActivePage] = useState('dashboard');
   const [theme, setTheme] = useState('dark');
   const [currentUser, setCurrentUser] = useState(() => loadCurrentUser());
+  const [deviceId, setDeviceId] = useState(() => localDeviceId());
   const systemStatus = mapResultToSystemStatus(overallResult);
 
   // remember theme preference
@@ -48,6 +49,17 @@ export default function App() {
     }
   }, []);
 
+  React.useEffect(() => {
+    let active = true;
+    fetch(`${import.meta.env.VITE_WATCHER_URL || 'http://127.0.0.1:8765'}/api/device`)
+      .then((response) => (response.ok ? response.json() : null))
+      .then((device) => {
+        if (active && device?.device_id) setDeviceId(device.device_id);
+      })
+      .catch(() => {});
+    return () => { active = false; };
+  }, []);
+
   const toggleTheme = () => {
     setTheme((t) => (t === 'dark' ? 'light' : 'dark'));
   };
@@ -59,13 +71,13 @@ export default function App() {
   }
 
   const activeContent = useMemo(() => {
-    if (activePage === 'dashboard') return <DashboardPage currentUser={currentUser} />;
-    if (activePage === 'scan') return <ScanPage currentUser={currentUser} />;
-    if (activePage === 'result') return <ResultPage overallResult={overallResult} currentUser={currentUser} />;
-    if (activePage === 'decoder-report') return <DecoderReportPage currentUser={currentUser} />;
-    if (activePage === 'logs') return <LogsPage currentUser={currentUser} />;
+    if (activePage === 'dashboard') return <DashboardPage currentUser={currentUser} deviceId={deviceId} />;
+    if (activePage === 'scan') return <ScanPage currentUser={currentUser} deviceId={deviceId} />;
+    if (activePage === 'result') return <ResultPage overallResult={overallResult} currentUser={currentUser} deviceId={deviceId} />;
+    if (activePage === 'decoder-report') return <DecoderReportPage currentUser={currentUser} deviceId={deviceId} />;
+    if (activePage === 'logs') return <LogsPage currentUser={currentUser} deviceId={deviceId} />;
     return <SettingsPage theme={theme} onToggleTheme={toggleTheme} currentUser={currentUser} />;
-  }, [activePage, theme, currentUser]);
+  }, [activePage, theme, currentUser, deviceId]);
 
   const handleLogout = () => {
     clearCurrentUser();

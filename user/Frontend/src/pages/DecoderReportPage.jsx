@@ -55,7 +55,7 @@ function extractedDataIsImage(item) {
   return item?.type === 'image' || /\.(png|jpe?g|gif|webp|bmp)$/i.test(String(item?.file_name || item?.extension || ''));
 }
 
-export default function DecoderReportPage({ currentUser }) {
+export default function DecoderReportPage({ currentUser, deviceId }) {
   const userId = currentUser?.id || 'guest';
   const latestScanKey = scopedKey(LATEST_SCAN_KEY, userId);
   const [payload, setPayload] = useState(null);
@@ -77,7 +77,7 @@ export default function DecoderReportPage({ currentUser }) {
 
     const loadLatest = async () => {
       try {
-        const response = await fetch(`${API_BASE_URL}/api/scan/latest?user_id=${encodeURIComponent(userId)}`);
+        const response = await fetch(`${API_BASE_URL}/api/scan/latest?user_id=${encodeURIComponent(userId)}&device_id=${encodeURIComponent(deviceId)}`);
         if (!response.ok) return;
         const latest = await response.json();
         if (!active) return;
@@ -95,7 +95,7 @@ export default function DecoderReportPage({ currentUser }) {
       active = false;
       clearInterval(timer);
     };
-  }, [latestScanKey, userId]);
+  }, [latestScanKey, userId, deviceId]);
 
   const decoder = decoderFromPayload(payload);
   const cleanImageUrl = absoluteReportUrl(decoder?.sanitized_image?.url);

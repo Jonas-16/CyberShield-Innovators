@@ -1,4 +1,5 @@
 const CURRENT_USER_KEY = 'cybershieldCurrentUser';
+const DEVICE_ID_KEY = 'cybershieldDeviceId';
 
 function safeParse(value, fallback) {
   try {
@@ -35,4 +36,15 @@ export function clearCurrentUser() {
 
 export function scopedKey(baseKey, userId) {
   return `${baseKey}:${userId || 'guest'}`;
+}
+
+export function localDeviceId() {
+  let deviceId = localStorage.getItem(DEVICE_ID_KEY);
+  if (!deviceId) {
+    const uuid = globalThis.crypto?.randomUUID?.()
+      || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    deviceId = `browser-${uuid}`;
+    localStorage.setItem(DEVICE_ID_KEY, deviceId);
+  }
+  return deviceId;
 }

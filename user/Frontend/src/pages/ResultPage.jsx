@@ -195,7 +195,7 @@ function downloadUrl(url) {
   return `${absolute}${separator}download=true`;
 }
 
-export default function ResultPage({ overallResult, currentUser }) {
+export default function ResultPage({ overallResult, currentUser, deviceId }) {
   const [fileInfo, setFileInfo] = useState(null);
   const [message, setMessage] = useState('');
   const [isBusy, setIsBusy] = useState(false);
@@ -220,7 +220,7 @@ export default function ResultPage({ overallResult, currentUser }) {
 
     const loadLatest = async () => {
       try {
-        const response = await fetch(`${API_BASE_URL}/api/scan/latest?user_id=${encodeURIComponent(userId)}`);
+        const response = await fetch(`${API_BASE_URL}/api/scan/latest?user_id=${encodeURIComponent(userId)}&device_id=${encodeURIComponent(deviceId)}`);
         if (!response.ok) return;
         const payload = await response.json();
         if (isTerminalPayload(payload)) return;
@@ -238,7 +238,7 @@ export default function ResultPage({ overallResult, currentUser }) {
     };
 
     loadLatest();
-  }, [clearedResultKey, latestScanKey, userId]);
+  }, [clearedResultKey, latestScanKey, userId, deviceId]);
 
   useEffect(() => {
     let active = true;
@@ -249,7 +249,7 @@ export default function ResultPage({ overallResult, currentUser }) {
       }
 
       try {
-        const response = await fetch(`${API_BASE_URL}/api/scan/latest?user_id=${encodeURIComponent(userId)}`);
+        const response = await fetch(`${API_BASE_URL}/api/scan/latest?user_id=${encodeURIComponent(userId)}&device_id=${encodeURIComponent(deviceId)}`);
         if (!response.ok) return;
 
         const payload = await response.json();
@@ -277,7 +277,7 @@ export default function ResultPage({ overallResult, currentUser }) {
       active = false;
       clearInterval(timer);
     };
-  }, [fileInfo?.file_name, isManualUpload, clearedResultKey, userId]);
+  }, [fileInfo?.file_name, isManualUpload, clearedResultKey, userId, deviceId]);
 
   useEffect(() => {
     const fileName = fileInfo?.file_name;
@@ -285,10 +285,17 @@ export default function ResultPage({ overallResult, currentUser }) {
 
     const refresh = async () => {
       try {
-        const response = await fetch(`${API_BASE_URL}/api/scan/results/${encodeURIComponent(fileName)}?user_id=${encodeURIComponent(userId)}`);
+        const response = await fetch(`${API_BASE_URL}/api/scan/results/${encodeURIComponent(fileName)}?user_id=${encodeURIComponent(userId)}&device_id=${encodeURIComponent(deviceId)}`);
         if (response.status === 404) {
           try {
-            const latestResponse = await fetch(`${API_BASE_URL}/api/scan/latest?user_id=${encodeURIComponent(userId)}`);
+            const latestResponse = await fetch(`${API_BASE_URL}/api/scan/latest?user_id=${encodeURIComponent(userId)}&device_id=${encodeURIComponent(deviceId)}`);
+            if (latestResponse.status === 404) {
+              localStorage.removeItem(latestScanKey);
+              setFileInfo(null);
+              setIsManualUpload(false);
+              setMessage('No cloud scan result is currently available.');
+              return;
+            }
             if (latestResponse.ok) {
               const latestPayload = await latestResponse.json();
               if (isTerminalPayload(latestPayload)) {
@@ -329,7 +336,7 @@ export default function ResultPage({ overallResult, currentUser }) {
     const timer = setInterval(refresh, 2000);
 
     return () => clearInterval(timer);
-  }, [fileInfo?.file_name, isManualUpload, clearedResultKey, latestScanKey, userId]);
+  }, [fileInfo?.file_name, isManualUpload, clearedResultKey, latestScanKey, userId, deviceId]);
 
   useEffect(() => {
     const fileName = fileInfo?.file_name;

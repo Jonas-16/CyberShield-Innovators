@@ -101,8 +101,8 @@ def normalize_user_id(user_id: str | None) -> str:
     return safe.strip("-") or "guest"
 
 
-def result_key(user_id: str | None, file_name: str) -> str:
-    return f"{normalize_user_id(user_id)}::{Path(file_name).name}"
+def result_key(user_id: str | None, file_name: str, device_id: str | None = None) -> str:
+    return f"{normalize_user_id(user_id)}::{str(device_id or 'unknown-device').strip() or 'unknown-device'}::{Path(file_name).name}"
 
 
 def device_metadata(
@@ -417,7 +417,7 @@ def process_staged_file(target_path: Path, user_id: str | None = None, device: d
         **device,
         "ts": str(scan_result.get("ts") or datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")),
     }
-    SCAN_RESULTS[result_key(owner_id, scan_target.name)] = payload
+    SCAN_RESULTS[result_key(owner_id, scan_target.name, device.get("device_id"))] = payload
     return payload
 
 
@@ -454,8 +454,8 @@ def notify_scan_action() -> None:
         SCAN_ACTION_CONDITION.notify_all()
 
 
-def wait_for_scan_action(file_name: str, owner_id: str) -> None:
-    key = result_key(owner_id, file_name)
+def wait_for_scan_action(file_name: str, owner_id: str, device_id: str | None = None) -> None:
+    key = result_key(owner_id, file_name, device_id)
     while True:
         record = SCAN_RESULTS.get(key)
         if not record:
@@ -474,8 +474,8 @@ def scan_job_worker_loop() -> None:
         owner_id = job["owner_id"]
         device = job["device"]
         try:
-            queued_payload = SCAN_RESULTS.get(result_key(owner_id, target_path.name), {})
-            SCAN_RESULTS[result_key(owner_id, target_path.name)] = {
+            queued_payload = SCAN_RESULTS.get(result_key(owner_id, target_path.name, device.get("device_id")), {})
+            SCAN_RESULTS[result_key(owner_id, target_path.name, device.get("device_id"))] = {
                 **queued_payload,
                 "status": "processing",
                 "message": "Scan is running. Windows Sandbox is starting and the sandbox copy is being scanned.",
@@ -483,14 +483,14 @@ def scan_job_worker_loop() -> None:
             }
             result = process_staged_file(target_path, owner_id, device)
             if str(result.get("post_action", "")) == "manual_review_required":
-                SCAN_RESULTS[result_key(owner_id, result["file_name"])] = {
+                SCAN_RESULTS[result_key(owner_id, result["file_name"], device.get("device_id"))] = {
                     **result,
                     "status": "completed",
                     "message": "Scan complete. Waiting for this file to be approved/saved or rejected/deleted before starting the next queued file.",
                 }
-                wait_for_scan_action(str(result["file_name"]), owner_id)
+                wait_for_scan_action(str(result["file_name"]), owner_id, device.get("device_id"))
         except Exception as exc:
-            SCAN_RESULTS[result_key(owner_id, target_path.name)] = failed_scan_payload(
+            SCAN_RESULTS[result_key(owner_id, target_path.name, device.get("device_id"))] = failed_scan_payload(
                 target_path,
                 size_bytes,
                 owner_id,
@@ -533,7 +533,7 @@ def start_background_scan(
         "message": "Upload received by backend. Scan queued and will run after earlier files finish.",
         "ts": submitted_at,
     }
-    SCAN_RESULTS[result_key(owner_id, target_path.name)] = payload
+    SCAN_RESULTS[result_key(owner_id, target_path.name, device.get("device_id"))] = payload
     start_scan_worker_once()
     SCAN_JOB_QUEUE.put(
         {
@@ -583,12 +583,15 @@ def iter_scan_log_events() -> list[dict[str, Any]]:
     return events
 
 
-def read_scan_logs(limit: int, user_id: str | None = None) -> list[dict[str, Any]]:
+def read_scan_logs(limit: int, user_id: str | None = None, device_id: str | None = None) -> list[dict[str, Any]]:
     owner_id = normalize_user_id(user_id) if user_id is not None else None
+    requested_device_id = str(device_id).strip() if device_id is not None else None
     events: list[dict[str, Any]] = []
 
     for event in iter_scan_log_events():
         if owner_id is not None and normalize_user_id(event.get("user_id")) != owner_id:
+            continue
+        if requested_device_id is not None and str(event.get("device_id") or "unknown-device").strip() != requested_device_id:
             continue
         event["overall_result"] = overall_result_for(event)
         events.append(event)
@@ -625,21 +628,22 @@ def result_payload_from_log(event: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def get_latest_active_result(user_id: str | None = None) -> dict[str, Any] | None:
+def get_latest_active_result(user_id: str | None = None, device_id: str | None = None) -> dict[str, Any] | None:
     if not SCAN_RESULTS:
         return None
     owner_id = normalize_user_id(user_id) if user_id is not None else None
     items = [
         dict(item)
         for item in SCAN_RESULTS.values()
-        if owner_id is None or normalize_user_id(item.get("user_id")) == owner_id
+        if (owner_id is None or normalize_user_id(item.get("user_id")) == owner_id)
+        and (device_id is None or str(item.get("device_id") or "unknown-device").strip() == str(device_id).strip())
     ]
     items.sort(key=lambda item: str(item.get("ts", "")), reverse=True)
     return items[0] if items else None
 
 
-def get_latest_log_event(current_session_only: bool = False, user_id: str | None = None) -> dict[str, Any] | None:
-    items = read_scan_logs(limit=500, user_id=user_id)
+def get_latest_log_event(current_session_only: bool = False, user_id: str | None = None, device_id: str | None = None) -> dict[str, Any] | None:
+    items = read_scan_logs(limit=500, user_id=user_id, device_id=device_id)
     if current_session_only:
         items = [item for item in items if (parse_event_ts(item.get("ts")) or datetime.min.replace(tzinfo=timezone.utc)) >= APP_STARTED_AT]
     terminal_keys: set[str] = set()
@@ -654,7 +658,7 @@ def get_latest_log_event(current_session_only: bool = False, user_id: str | None
     return None
 
 
-def find_logged_event(file_name: str, user_id: str | None = None) -> dict[str, Any] | None:
+def find_logged_event(file_name: str, user_id: str | None = None, device_id: str | None = None) -> dict[str, Any] | None:
     safe_name = Path(file_name).name
     if not safe_name:
         return None
@@ -665,6 +669,8 @@ def find_logged_event(file_name: str, user_id: str | None = None) -> dict[str, A
         if Path(str(event.get("file_name", ""))).name != safe_name:
             continue
         if owner_id is not None and normalize_user_id(event.get("user_id")) != owner_id:
+            continue
+        if device_id is not None and str(event.get("device_id") or "unknown-device").strip() != str(device_id).strip():
             continue
         latest_match = event
     if latest_match:
@@ -901,10 +907,12 @@ async def upload_to_sandbox(
 
 
 @app.get("/api/scan/results/{file_name}")
-def get_scan_result(file_name: str, user_id: str | None = Query(default=None)) -> dict[str, Any]:
+def get_scan_result(file_name: str, user_id: str | None = Query(default=None), device_id: str | None = Query(default=None)) -> dict[str, Any]:
     safe_name = Path(file_name).name
-    record = SCAN_RESULTS.get(result_key(user_id, safe_name))
-    logged_event = find_logged_event(safe_name, user_id=user_id)
+    record = SCAN_RESULTS.get(result_key(user_id, safe_name, device_id))
+    if record and device_id is not None and str(record.get("device_id") or "unknown-device").strip() != str(device_id).strip():
+        record = None
+    logged_event = find_logged_event(safe_name, user_id=user_id, device_id=device_id)
 
     if logged_event and str(logged_event.get("post_action", "")) not in TERMINAL_POST_ACTIONS:
         logged_ts = parse_event_ts(logged_event.get("ts"))
@@ -919,15 +927,15 @@ def get_scan_result(file_name: str, user_id: str | None = Query(default=None)) -
 
 
 @app.get("/api/scan/logs")
-def get_scan_logs(limit: int = Query(default=50, ge=1, le=500), user_id: str | None = Query(default=None)) -> dict[str, Any]:
-    items = read_scan_logs(limit, user_id=user_id)
+def get_scan_logs(limit: int = Query(default=50, ge=1, le=500), user_id: str | None = Query(default=None), device_id: str | None = Query(default=None)) -> dict[str, Any]:
+    items = read_scan_logs(limit, user_id=user_id, device_id=device_id)
     return {"count": len(items), "items": items}
 
 
 @app.get("/api/scan/latest")
-def get_latest_scan_result(user_id: str | None = Query(default=None)) -> dict[str, Any]:
-    latest_log = get_latest_log_event(current_session_only=True, user_id=user_id)
-    latest_active = get_latest_active_result(user_id=user_id)
+def get_latest_scan_result(user_id: str | None = Query(default=None), device_id: str | None = Query(default=None)) -> dict[str, Any]:
+    latest_log = get_latest_log_event(current_session_only=True, user_id=user_id, device_id=device_id)
+    latest_active = get_latest_active_result(user_id=user_id, device_id=device_id)
 
     candidates: list[dict[str, Any]] = []
     if latest_log:

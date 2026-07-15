@@ -126,7 +126,7 @@ function uploadUrl(userId, deviceInfo) {
   return `${API_BASE_URL}/api/scan/upload?${params.toString()}`;
 }
 
-export default function ScanPage({ currentUser }) {
+export default function ScanPage({ currentUser, deviceId }) {
   const [selectedFile, setSelectedFile] = useState(null);
   const [isUploading, setIsUploading] = useState(false);
   const [message, setMessage] = useState('');
@@ -165,7 +165,13 @@ export default function ScanPage({ currentUser }) {
 
     const poll = async () => {
       try {
-        const response = await fetch(`${API_BASE_URL}/api/scan/latest?user_id=${encodeURIComponent(userId)}`);
+        const response = await fetch(`${API_BASE_URL}/api/scan/latest?user_id=${encodeURIComponent(userId)}&device_id=${encodeURIComponent(deviceId)}`);
+        if (response.status === 404) {
+          localStorage.removeItem(latestScanKey);
+          setResult(null);
+          setMessage('No backend scan is active.');
+          return;
+        }
         if (!response.ok) return;
         const payload = await response.json();
         if (!active) {
@@ -198,7 +204,7 @@ export default function ScanPage({ currentUser }) {
       active = false;
       clearInterval(timer);
     };
-  }, [result?.file_name, result?.status, latestScanKey, userId]);
+  }, [result?.file_name, result?.status, latestScanKey, userId, deviceId]);
 
   const currentStep = useMemo(() => {
     if (isUploading) return 2;
@@ -227,7 +233,7 @@ export default function ScanPage({ currentUser }) {
     formData.append('file', file);
 
     try {
-      const deviceInfo = await loadDeviceInfo();
+      const deviceInfo = (await loadDeviceInfo()) || { device_id: deviceId };
       const response = await fetch(uploadUrl(userId, deviceInfo), {
         method: 'POST',
         body: formData

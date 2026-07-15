@@ -15,7 +15,7 @@ function scanKey(entry) {
   return `${entry?.file_name || ''}:${entry?.path || ''}`;
 }
 
-export default function DashboardPage({ currentUser }) {
+export default function DashboardPage({ currentUser, deviceId }) {
   const [logs, setLogs] = useState([]);
   const [message, setMessage] = useState('');
   const userId = currentUser?.id || 'guest';
@@ -25,7 +25,7 @@ export default function DashboardPage({ currentUser }) {
 
     const loadLogs = async () => {
       try {
-        const response = await fetch(`${API_BASE_URL}/api/scan/logs?limit=500&user_id=${encodeURIComponent(userId)}`);
+        const response = await fetch(`${API_BASE_URL}/api/scan/logs?limit=500&user_id=${encodeURIComponent(userId)}&device_id=${encodeURIComponent(deviceId)}`);
         if (!response.ok) {
           const payload = await response.json();
           throw new Error(payload?.detail || 'Failed to load dashboard stats');
@@ -49,7 +49,7 @@ export default function DashboardPage({ currentUser }) {
       active = false;
       clearInterval(timer);
     };
-  }, [userId]);
+  }, [userId, deviceId]);
 
   const stats = useMemo(() => {
     const uniqueScans = new Map();
