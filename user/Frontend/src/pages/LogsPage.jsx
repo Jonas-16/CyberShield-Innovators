@@ -60,16 +60,18 @@ function deviceLabel(entry) {
   return os ? `${name} (${os})` : name;
 }
 
-export default function LogsPage() {
+export default function LogsPage({ currentUser }) {
   const [items, setItems] = useState([]);
   const [message, setMessage] = useState('');
+  const userId = currentUser?.id || 'guest';
 
   useEffect(() => {
     let active = true;
 
     const load = async () => {
       try {
-        const response = await fetch(`${API_BASE_URL}/api/scan/logs?limit=500`);
+        const params = new URLSearchParams({ limit: '500', user_id: userId });
+        const response = await fetch(`${API_BASE_URL}/api/scan/logs?${params.toString()}`);
         if (!response.ok) {
           const payload = await response.json();
           throw new Error(payload?.detail || 'Failed to load scan logs');
@@ -92,12 +94,12 @@ export default function LogsPage() {
       active = false;
       clearInterval(timer);
     };
-  }, []);
+  }, [userId]);
 
   return (
     <section className="page">
       <h2>Logs Page</h2>
-      <p className="page-help">All scan log entries are shown here. Newest scan appears at the top.</p>
+      <p className="page-help">Only scans for your account are shown here. Newest scan appears at the top.</p>
       {message && <p className="scan-message">{message}</p>}
 
       <div className="card table-wrap logs-table-wrap">
