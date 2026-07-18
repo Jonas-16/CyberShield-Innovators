@@ -31,21 +31,34 @@ structural risk, evidence level, DEX count, certificate file count, and preproce
 ```powershell
 cd user\Frontend
 npm install
-npm run dev
+```
+```powershell
+cd user\watcher; python -m venv .venv; 
+>> .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+```powershell
+cd user
+powershell -ExecutionPolicy Bypass -File .\Start-FrontendAndWatcher.ps1
 ```
 
 For a two-laptop demo, create `user/Frontend/.env`:
 
 ```env
 VITE_BACKEND_URL=http://BACKEND_LAPTOP_IP:8000
+VITE_WATCHER_URL=http://127.0.0.1:8765
 ```
 
 ## Run The Cloud Backend
 
 ```powershell
 cd cloud\backend
-pip install -r requirements.txt
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+```powershell
+cd cloud\backend
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
 Use `--host 127.0.0.1` when the frontend and backend are on the same laptop.
@@ -54,6 +67,7 @@ Check scanner readiness after startup:
 
 ```text
 http://127.0.0.1:8000/api/scan/ml-status
+http://127.0.0.1:8000/api/health
 ```
 
 The response reports readiness for the steganography, executable zero-day, and APK scanners.
